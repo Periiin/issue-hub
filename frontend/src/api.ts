@@ -150,3 +150,19 @@ export const saveFixContext = (id: number, text: string) =>
 
 export const regenerateFixContext = (id: number) =>
   api.post<{ ok: boolean; text: string; path: string }>(`/issues/${id}/context/regenerate`).then((r) => r.data)
+
+/** 一轮「开始修改」的归档：实际改的过程与方案的出入 */
+export interface FixAttempt {
+  seq: number
+  provider?: string
+  status?: 'changed' | 'unchanged' | 'failed' | 'partial'
+  summary?: string
+  actual_root_cause?: string
+  deviations?: string[]
+  found_issues?: string[]
+  files?: string[]
+  risks?: string[]
+  verification?: string
+  repos?: Record<string, { status?: string; error?: string; summary?: string; files?: string[]; deviations?: string[]; found_issues?: string[] }>
+  created_at?: string
+}

@@ -181,6 +181,37 @@ def drop_all_worktrees(issue_id: int, repos: list[str]) -> None:
             pass
 
 
+# ---------------- 修改轮次 ----------------
+
+def _attempt_row(row) -> dict:
+    import json as _json
+    d = dict(row)
+    for key in ("deviations", "found_issues", "files", "risks", "repos"):
+        raw = d.get(key)
+        try:
+            d[key] = _json.loads(raw) if raw else None
+        except _json.JSONDecodeError:
+            d[key] = raw
+    return d
+
+
+def list_attempts(issue_id: int) -> list[dict]:
+    """该 issue 的全部修改轮次，按 seq 倒序（最新在前）。"""
+    from .db import connect
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM fix_attempt WHERE issue_id = ? ORDER BY seq DESC", (issue_id,)).fetchall()
+    return [_attempt_row(r) for r in rows]
+
+
+def next_attempt_seq(issue_id: int) -> int:
+    from .db import connect
+    with connect() as conn:
+        row = conn.execute("SELECT COALESCE(MAX(seq), 0) + 1 AS next FROM fix_attempt WHERE issue_id = ?",
+                           (issue_id,)).fetchone()
+    return row["next"] if row else 1
+
+
 # ---------------- 代码范围 ----------------
 
 def list_code_roots() -> list[dict]:

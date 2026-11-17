@@ -55,6 +55,27 @@ CREATE TABLE IF NOT EXISTS ai_run (
 );
 CREATE INDEX IF NOT EXISTS idx_ai_run_issue ON ai_run(issue_id);
 
+-- 修改轮次：每次「开始修改」落一条，记录 agent 实际改的过程与分析方案的出入。
+-- 这是历史记录，驳回/重新修改都不删 —— 方案是一回事，实际改出来是另一回事。
+CREATE TABLE IF NOT EXISTS fix_attempt (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    issue_id          INTEGER NOT NULL,
+    seq               INTEGER NOT NULL,   -- 第几次修改（按 issue 递增）
+    provider          TEXT,
+    status            TEXT,               -- changed / unchanged / failed / partial
+    summary           TEXT,               -- 一句话总结
+    actual_root_cause TEXT,               -- 实际根因（与分析不一致时尤其重要）
+    deviations        TEXT,               -- JSON 数组：与既定修复思路的出入
+    found_issues      TEXT,               -- JSON 数组：修改过程中发现的新问题/隐患
+    files             TEXT,               -- JSON 数组：实际改动的文件
+    risks             TEXT,               -- JSON 数组：遗留风险
+    verification      TEXT,               -- 怎么验证的
+    repos             TEXT,               -- JSON：本次各仓库的执行结果概要
+    raw_report        TEXT,               -- agent 原始输出（JSON 解析失败时人工排查用）
+    created_at        TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_fix_attempt_issue ON fix_attempt(issue_id);
+
 CREATE TABLE IF NOT EXISTS event (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     issue_id    INTEGER NOT NULL,

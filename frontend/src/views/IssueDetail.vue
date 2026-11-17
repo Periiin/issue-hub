@@ -424,6 +424,79 @@
           </template>
         </div>
       </div>
+
+      <!-- 修改轮次：每轮与方案的出入、过程中发现的问题（驳回也不删，历史就是历史） -->
+      <div v-if="attempts.length" class="attempts">
+        <div class="attempts-head">
+          <span class="attempts-title">修改轮次</span>
+          <span class="ih-muted attempts-sub">
+            共 {{ attempts.length }} 轮 · 记录每次实际修改与分析方案的出入
+          </span>
+          <el-badge
+            v-if="attempts.some((a) => (a.deviations?.length || 0) + (a.found_issues?.length || 0) > 0)"
+            value="有出入" type="warning" class="attempts-badge"
+          />
+        </div>
+        <el-collapse v-model="openAttempts" class="attempts-collapse">
+          <el-collapse-item
+            v-for="a in attempts" :key="a.seq" :name="a.seq"
+          >
+            <template #title>
+              <span class="attempt-title">
+                <span class="attempt-seq">第 {{ a.seq }} 次</span>
+                <span class="attempt-status" :class="`is-${a.status}`">{{ attemptStatusLabel(a) }}</span>
+                <span
+                  v-if="(a.deviations?.length || 0) + (a.found_issues?.length || 0) > 0"
+                  class="attempt-flag"
+                >与方案有出入</span>
+                <span v-if="a.files?.length" class="ih-muted attempt-files">{{ a.files.length }} 个文件</span>
+                <span class="ih-muted attempt-time">{{ (a.created_at || '').slice(0, 19) }}</span>
+              </span>
+            </template>
+            <div class="attempt-body">
+              <div v-if="a.deviations?.length" class="attempt-sec attempt-sec--warn">
+                <div class="attempt-sec-title">与方案的出入</div>
+                <ul><li v-for="(d, i) in a.deviations" :key="i">{{ d }}</li></ul>
+              </div>
+              <div v-if="a.found_issues?.length" class="attempt-sec attempt-sec--info">
+                <div class="attempt-sec-title">过程中发现的新问题</div>
+                <ul><li v-for="(d, i) in a.found_issues" :key="i">{{ d }}</li></ul>
+              </div>
+              <div v-if="a.actual_root_cause" class="attempt-sec">
+                <div class="attempt-sec-title">实际根因</div>
+                <div class="attempt-sec-text">{{ a.actual_root_cause }}</div>
+              </div>
+              <div v-if="a.files?.length" class="attempt-sec">
+                <div class="attempt-sec-title">改动文件</div>
+                <code v-for="(f, i) in a.files" :key="i" class="attempt-file">{{ f }}</code>
+              </div>
+              <div v-if="a.risks?.length" class="attempt-sec">
+                <div class="attempt-sec-title">风险</div>
+                <ul><li v-for="(d, i) in a.risks" :key="i">{{ d }}</li></ul>
+              </div>
+              <div v-if="a.verification" class="attempt-sec">
+                <div class="attempt-sec-title">验证方式</div>
+                <div class="attempt-sec-text">{{ a.verification }}</div>
+              </div>
+              <div v-if="a.summary" class="attempt-sec">
+                <div class="attempt-sec-title">总结</div>
+                <div class="attempt-sec-text attempt-summary">{{ a.summary }}</div>
+              </div>
+              <div v-if="a.repos" class="attempt-repos">
+                <div
+                  v-for="(st, rp) in a.repos" :key="rp" class="attempt-repo-row"
+                >
+                  <span class="ih-muted">{{ rp.split(/[\\/]/).pop() }}</span>
+                  <span class="attempt-repo-status" :class="`is-${st.status}`">
+                    {{ st.status === 'failed' ? '失败' : st.status === 'unchanged' ? '无改动' : '有改动' }}
+                  </span>
+                  <span v-if="st.error" class="attempt-repo-err">{{ st.error }}</span>
+                </div>
+              </div>
+            </div>
+          </el-collapse-item>
+        </el-collapse>
+      </div>
       </div>
     </section>
 
@@ -470,7 +543,7 @@ import {
   acceptFix, applyFix, confirmQualify, deleteAttachment, deleteIssue, fileUrl,
   getCodeRoots, getFixContext, getFixDiff, getIssue, getSettings, patchIssue,
   regenerateFixContext, rejectFix, runFix, runQualify, runTriage, saveFixContext,
-  uploadAttachments, type CodeRoot, type TargetRepo
+  uploadAttachments, type CodeRoot, type TargetRepo, type FixAttempt
 } from '../api'
 
 const route = useRoute()
@@ -552,16 +625,33 @@ const applySectionDefaults = () => {
 
 /** 收起时标题旁的摘要：让用户不用展开也能看到关键结果 */
 const fixFoldSummary = computed(() => {
-  if (!repoStateList.value.length) return '未开始'
-  const changed = repoStateList.value.filter((r) => r.state.status === 'changed' && !r.state.accepted).length
-  const failed = repoStateList.value.filter((r) => r.state.status === 'failed').length
-  const accepted = repoStateList.value.filter((r) => r.state.accepted).length
-  const parts: string[] = []
-  if (changed) parts.push(`${changed} 待审阅`)
-  if (accepted) parts.push(`${accepted} 已采纳`)
-  if (failed) parts.push(`${failed} 失败`)
-  return parts.length ? parts.join(' · ') : '无改动'
+  const pending = repoStateList.value.filter((r) => r.state.status === 'changed' && !r.state.accepted).length
+  if (pending) return `${pending} 待审阅`
+  if (!repoStateList.value.length && !attempts.value.length) return '未开始'
+  if (repoStateList.value.length) {
+    const accepted = repoStateList.value.filter((r) => r.state.accepted).length
+    const failed = repoStateList.value.filter((r) => r.state.status === 'failed').length
+    const parts: string[] = []
+    if (accepted) parts.push(`${accepted} 已采纳`)
+    if (failed) parts.push(`${failed} 失败`)
+    return parts.length ? parts.join(' · ') : '无改动'
+  }
+  return `${attempts.value.length} 轮修改记录`
 })
+
+/* ===== 修改轮次（每轮与方案的出入） ===== */
+const attempts = ref<FixAttempt[]>([])
+const openAttempts = ref<number[]>([])
+
+const loadAttempts = (list?: FixAttempt[]) => {
+  attempts.value = list || []
+  // 默认只展开最新一轮；有出入的轮次更值得看
+  const withDeviation = attempts.value.find((a) => (a.deviations?.length || 0) + (a.found_issues?.length || 0) > 0)
+  openAttempts.value = withDeviation ? [withDeviation.seq] : attempts.value.length ? [attempts.value[0].seq] : []
+}
+
+const attemptStatusLabel = (a: FixAttempt) =>
+  ({ changed: '有改动', unchanged: '无改动', failed: '失败', partial: '部分成功' } as any)[a.status || ''] || a.status || '-'
 
 /** 可做 worktree 的仓库根（后端已按 repoRoot 去重，含 covers 子目录信息） */
 const targetRepos = ref<TargetRepo[]>([])
@@ -735,6 +825,7 @@ const load = async () => {
   issue.value = res.issue
   attachments.value = res.attachments
   events.value = res.events
+  loadAttempts(res.attempts)
   rawText.value = res.issue.raw_text || ''
   selectedScopes.value = Array.isArray(res.issue.code_scopes) ? res.issue.code_scopes : []
   const tr = res.issue.target_repos
@@ -901,6 +992,7 @@ const doApply = async () => {
     const res = await applyFix(id.value, { provider: provider.value, repos: selectedRepos.value })
     await load()
     diffs.value = res.diffs || {}
+    if (res.attempt) loadAttempts([res.attempt, ...attempts.value])
     const states = Object.values(res.state?.repos || {}) as any[]
     const failed = states.filter((s) => s.status === 'failed')
     const changed = states.filter((s) => s.status === 'changed')
@@ -1253,6 +1345,72 @@ onMounted(async () => {
   margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--ih-line);
   font-size: 12.5px; color: var(--ih-sub); white-space: pre-wrap; line-height: 1.65;
 }
+
+/* ---------- 修改轮次 ---------- */
+.attempts { margin-top: 4px; }
+.attempts-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+.attempts-title { font-weight: 700; font-size: 13.5px; }
+.attempts-sub { font-size: 12px; }
+.attempts-badge { margin-left: auto; }
+.attempts-collapse {
+  border: 1px solid var(--ih-line); border-radius: 12px; overflow: hidden;
+  background: var(--ih-card);
+}
+.attempts-collapse :deep(.el-collapse-item__header) {
+  padding: 0 14px; height: 44px; background: transparent; border-bottom-color: var(--ih-line);
+}
+.attempts-collapse :deep(.el-collapse-item__wrap) {
+  background: transparent; border-bottom-color: var(--ih-line);
+}
+.attempts-collapse :deep(.el-collapse-item__content) { padding: 14px 16px; }
+.attempt-title { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; min-width: 0; }
+.attempt-seq { font-weight: 700; font-size: 13px; }
+.attempt-status {
+  font-size: 11px; padding: 1px 8px; border-radius: 999px;
+  background: var(--ih-soft-2); color: var(--ih-sub);
+}
+.attempt-status.is-changed { background: var(--ih-success-soft); color: var(--ih-success-ink); }
+.attempt-status.is-failed { background: var(--ih-warn-soft); color: var(--ih-warn-ink); }
+.attempt-status.is-partial { background: var(--ih-warn-soft); color: var(--ih-warn-ink); }
+.attempt-flag {
+  font-size: 11px; padding: 1px 8px; border-radius: 999px;
+  background: var(--ih-warn-soft); color: var(--ih-warn-ink); font-weight: 600;
+}
+.attempt-files, .attempt-time { font-size: 11.5px; }
+.attempt-body { display: flex; flex-direction: column; gap: 12px; }
+.attempt-sec { font-size: 12.5px; line-height: 1.65; }
+.attempt-sec-title {
+  font-size: 11.5px; font-weight: 700; letter-spacing: 0.05em;
+  color: var(--ih-sub); margin-bottom: 4px;
+}
+.attempt-sec-text { color: var(--ih-ink); white-space: pre-wrap; word-break: break-word; }
+.attempt-sec ul { margin: 0; padding-left: 18px; }
+.attempt-sec--warn {
+  background: var(--ih-warn-soft); color: var(--ih-warn-ink);
+  border-left: 3px solid var(--el-color-warning);
+  border-radius: 0 10px 10px 0; padding: 10px 14px;
+}
+.attempt-sec--warn .attempt-sec-title { color: var(--ih-warn-ink); }
+.attempt-sec--info {
+  background: var(--ih-primary-soft);
+  border-left: 3px solid var(--el-color-primary);
+  border-radius: 0 10px 10px 0; padding: 10px 14px;
+}
+.attempt-file {
+  display: inline-block; margin: 2px 6px 2px 0; padding: 1px 7px;
+  border-radius: 5px; background: var(--ih-soft); border: 1px solid var(--ih-line);
+  font-size: 11.5px; word-break: break-all;
+}
+.attempt-summary { color: var(--ih-sub); }
+.attempt-repos { border-top: 1px dashed var(--ih-line); padding-top: 10px; display: flex; flex-direction: column; gap: 5px; }
+.attempt-repo-row { display: flex; align-items: center; gap: 8px; font-size: 12px; flex-wrap: wrap; }
+.attempt-repo-status {
+  font-size: 11px; padding: 1px 7px; border-radius: 999px;
+  background: var(--ih-soft-2); color: var(--ih-sub);
+}
+.attempt-repo-status.is-changed { background: var(--ih-success-soft); color: var(--ih-success-ink); }
+.attempt-repo-status.is-failed { background: var(--ih-warn-soft); color: var(--ih-warn-ink); }
+.attempt-repo-err { color: var(--ih-warn-ink); font-size: 11.5px; word-break: break-all; }
 
 .scope-warn {
   padding: 12px 14px; border-radius: 10px; margin-bottom: 12px;

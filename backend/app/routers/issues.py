@@ -91,7 +91,9 @@ def get_issue(issue_id: int):
     # 兼容前端：target_repos 为空时回退到旧的单值字段
     if not issue.get("target_repos") and issue.get("target_repo"):
         issue["target_repos"] = [issue["target_repo"]]
-    return {"issue": issue, "attachments": attachments, "runs": runs, "events": events}
+    from ..fix import list_attempts
+    return {"issue": issue, "attachments": attachments, "runs": runs, "events": events,
+            "attempts": list_attempts(issue_id)}
 
 
 @router.patch("/{issue_id}")

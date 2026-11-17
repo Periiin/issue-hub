@@ -154,11 +154,21 @@ APPLY_TEMPLATE = """在下面这个独立的工作目录里修复问题（这是
 7. 如果根因不在本 worktree 覆盖的目录内，**不要硬改**，在总结里说明「需要在 xxx 仓库修复」。
 
 【输出】
-用中文给出：
-- 根因（一两句）
-- 改了哪些文件、每处改了什么
-- 怎么验证
-- 有没有遗留风险
+先用中文简要说明你做了什么（供人直接阅读），然后**在最后输出一个 JSON 报告**（用 ```json 围栏包住）。
+这个报告会被记录成「第 N 次修改」的档案，重点是**实际改的过程与分析方案的出入**——
+发现方案不对、走弯路、根因和预想不一样，都要如实写，这对校准后续分析非常关键：
+
+```json
+{{
+  "actual_root_cause": "实际根因；与分析一致就照抄，不一致就写清楚差在哪",
+  "deviations": ["与既定修复思路的出入点，每条一句话；完全按方案改就给空数组"],
+  "found_issues": ["修改过程中顺带发现的新问题/隐患（本次没修的），没有就空数组"],
+  "files": ["实际改动的文件路径"],
+  "risks": ["遗留风险/回归点"],
+  "verification": "怎么验证的；没验证就说明原因",
+  "summary": "一两句话总结本次修改"
+}}
+```
 """
 
 
@@ -237,3 +247,52 @@ def extract_json(text: str) -> dict[str, Any]:
     if start >= 0 and end > start:
         return json.loads(cleaned[start:end + 1])
     raise ValueError(f"模型输出不是 JSON：{text[:200]}")
+
+
+_LAST_FENCE = re.compile(r"```json\s*(\{.*?\})\s*```", re.IGNORECASE | re.S)
+
+
+def _balanced_objects(text: str) -> list[str]:
+    """按花括号配对找出所有完整的 {...} 子串（含嵌套），按出现顺序返回。"""
+    out, depth, start = [], 0, None
+    for i, ch in enumerate(text):
+        if ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}":
+            if depth > 0:
+                depth -= 1
+                if depth == 0 and start is not None:
+                    out.append(text[start:i + 1])
+    return out
+
+
+def parse_apply_report(text: str) -> dict[str, Any] | None:
+    """从「改代码」agent 的输出里抠出末尾的 JSON 报告。
+
+    改代码的 agent 会先写一大段中文说明再给 JSON，正文里可能有花括号
+    （代码片段），所以不能用「第一个 { 到最后一个 }」的宽松策略：
+    1. 优先找最后一个 ```json 围栏；
+    2. 失败则扫描所有平衡的 {...}，从后往前试解析（报告在末尾）。
+    解析不出来返回 None——报告只是锦上添花，不能因为它把一次成功的
+    修改判成失败。
+    """
+    if not text or not text.strip():
+        return None
+    fences = _LAST_FENCE.findall(text)
+    for raw in reversed(fences):
+        try:
+            data = json.loads(raw)
+            if isinstance(data, dict):
+                return data
+        except json.JSONDecodeError:
+            continue
+    for raw in reversed(_balanced_objects(text)):
+        try:
+            data = json.loads(raw)
+            if isinstance(data, dict):
+                return data
+        except json.JSONDecodeError:
+            continue
+    return None

@@ -444,6 +444,16 @@ def reject_fix(issue_id: int, repo: str = "") -> dict:
 
 
 @mcp.tool()
+def get_fix_attempts(issue_id: int) -> dict:
+    """查看某个 issue 的修改轮次：每轮与方案的出入、过程中发现的问题、实际根因、文件改动与风险。"""
+    from app.routers.fix import list_attempts
+    row = _issue(issue_id)
+    if not row:
+        return {"error": f"问题 #{issue_id} 不存在"}
+    return {"attempts": list_attempts(issue_id)}
+
+
+@mcp.tool()
 def get_fix_context(issue_id: int) -> dict:
     """读取该 issue 的「修复边界」上下文文件（用户可编辑，会喂给改代码的 agent）。"""
     from app import context as ctx

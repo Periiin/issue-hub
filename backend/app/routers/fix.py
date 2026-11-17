@@ -21,9 +21,9 @@ from .. import context as ctx
 from ..db import add_event, connect, get_settings, now
 from ..fix import (FixError, collect_diff, commit_all, create_worktree, current_branch,
                    drop_all_worktrees, drop_worktree, ignore_list, is_repo_root,
-                   list_code_roots, list_target_repos, merge_to_base, project_notes,
-                   worktree_path)
-from ..prompts import APPLY_SYSTEM, build_apply_prompt
+                   list_code_roots, list_target_repos, list_attempts, merge_to_base,
+                   next_attempt_seq, project_notes, worktree_path)
+from ..prompts import APPLY_SYSTEM, build_apply_prompt, parse_apply_report
 from ..providers import AIError, run_ai
 from ..schemas import (ContextUpdate, FixAcceptReq, FixApplyReq, FixRejectReq)
 
@@ -221,19 +221,30 @@ def apply_fix(issue_id: int, payload: FixApplyReq):
 
         with connect() as conn:
             _record_run(conn, issue_id, "apply", result, True)
-        state["repos"][repo] = {
+        # agent 的结构化报告：与方案的出入、过程中发现的问题（解析失败就当纯文本总结）
+        report = parse_apply_report(result.text or "")
+        repo_state = {
             **info,
             "repo": repo,
             "name": _repo_info(repo).get("name") or Path(repo).name,
             "status": "changed" if not diff.get("empty") else "unchanged",
             "provider": result.provider,
             "duration_ms": result.duration_ms,
-            "summary": (result.text or "")[:4000],
+            "summary": (report or {}).get("summary") or (result.text or "")[:2000],
             "diff_stat": diff.get("stat", ""),
             "files": diff.get("files", []),
             "accepted": False,
             "updated_at": now(),
         }
+        if report:
+            repo_state["report"] = {
+                "actual_root_cause": report.get("actual_root_cause") or "",
+                "deviations": report.get("deviations") or [],
+                "found_issues": report.get("found_issues") or [],
+                "risks": report.get("risks") or [],
+                "verification": report.get("verification") or "",
+            }
+        state["repos"][repo] = repo_state
 
     with connect() as conn:
         conn.execute("UPDATE issue SET fix_state = ?, status = '处理中', updated_at = ? WHERE id = ?",
@@ -245,7 +256,97 @@ def apply_fix(issue_id: int, payload: FixApplyReq):
             note += f"，{len(failed)} 个失败"
         add_event(conn, issue_id, "fix_apply", from_status=issue["status"], to_status="处理中", note=note)
 
-    return {"state": state, "diffs": _collect_diffs(state), "context": ctx_file}
+    attempt = _save_attempt(issue_id, provider, state)
+    return {"state": state, "diffs": _collect_diffs(state), "context": ctx_file,
+            "attempt": attempt}
+
+
+def _save_attempt(issue_id: int, provider: str, state: dict) -> dict:
+    """把这次「开始修改」归档成一条 fix_attempt（第 N 次）。
+
+    多仓库时把各仓库的报告汇总：出入/发现的问题/文件取并集，
+    实际根因相同取一个、不同就逐仓库列出。
+    """
+    repo_states = state.get("repos") or {}
+    deviations: list[str] = []
+    found_issues: list[str] = []
+    files: list[str] = []
+    risks: list[str] = []
+    roots: dict[str, str] = {}
+    repo_brief: dict[str, dict] = {}
+
+    for repo, st in repo_states.items():
+        brief = {"status": st.get("status"), "error": st.get("error"),
+                 "summary": (st.get("summary") or "")[:500],
+                 "files": st.get("files") or []}
+        report = st.get("report") or {}
+        brief["deviations"] = report.get("deviations") or []
+        brief["found_issues"] = report.get("found_issues") or []
+        repo_brief[repo] = brief
+
+        for key, bucket in (("deviations", deviations), ("found_issues", found_issues), ("risks", risks)):
+            for item in report.get(key) or []:
+                if item and item not in bucket:
+                    bucket.append(item)
+        for f in st.get("files") or []:
+            if f and f not in files:
+                files.append(f)
+        root = (report.get("actual_root_cause") or "").strip()
+        if root:
+            roots[repo] = root
+
+    # 实际根因：所有仓库说法一致就取一个，不一致逐仓库列
+    unique_roots = list(dict.fromkeys(roots.values()))
+    actual_root = unique_roots[0] if len(unique_roots) == 1 else \
+        ("；".join(f"{Path(k).name}: {v}" for k, v in roots.items()) if roots else "")
+
+    statuses = [st.get("status") for st in repo_states.values()]
+    if not statuses:
+        attempt_status = "failed"
+    elif all(s == "failed" for s in statuses):
+        attempt_status = "failed"
+    elif all(s in ("changed", "unchanged") for s in statuses):
+        attempt_status = "changed" if "changed" in statuses else "unchanged"
+    else:
+        attempt_status = "partial"
+
+    with connect() as conn:
+        seq = next_attempt_seq(issue_id)
+        conn.execute(
+            "INSERT INTO fix_attempt(issue_id, seq, provider, status, summary, actual_root_cause, "
+            "deviations, found_issues, files, risks, verification, repos, raw_report, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (issue_id, seq, provider, attempt_status,
+             "；".join(filter(None, ((st.get("summary") or "")[:300] for st in repo_states.values()))),
+             actual_root,
+             json.dumps(deviations, ensure_ascii=False),
+             json.dumps(found_issues, ensure_ascii=False),
+             json.dumps(files, ensure_ascii=False),
+             json.dumps(risks, ensure_ascii=False),
+             "；".join(filter(None, ((st.get("report") or {}).get("verification") or ""
+                                     for st in repo_states.values()))),
+             json.dumps(repo_brief, ensure_ascii=False),
+             "；".join(filter(None, ((st.get("summary") or "") for st in repo_states.values())))[:5000],
+             now()))
+        row = conn.execute("SELECT * FROM fix_attempt WHERE issue_id = ? AND seq = ?",
+                           (issue_id, seq)).fetchone()
+
+    return _attempt_row(row)
+
+
+def _attempt_row(row) -> dict:
+    d = dict(row)
+    for key in ("deviations", "found_issues", "files", "risks", "repos"):
+        d[key] = _json(d.get(key))
+    return d
+
+
+@router.get("/issues/{issue_id}/fix/attempts")
+def fix_attempts(issue_id: int):
+    """修改轮次列表：每轮与方案的出入、发现的问题、实际根因、文件与风险。"""
+    with connect() as conn:
+        _issue(conn, issue_id)
+    return {"attempts": list_attempts(issue_id)}
 
 
 def _collect_diffs(state: dict) -> dict:
