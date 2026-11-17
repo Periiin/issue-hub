@@ -37,7 +37,7 @@ class BaseProvider:
     name = "base"
 
     def run(self, prompt: str, system: str = "", cwd: Optional[str] = None,
-            timeout: int = 180) -> AIResult:
+            timeout: int = 180, allow_write: bool = False) -> AIResult:
         raise NotImplementedError
 
 
@@ -47,7 +47,7 @@ class MockProvider(BaseProvider):
     name = "mock"
 
     def run(self, prompt: str, system: str = "", cwd: Optional[str] = None,
-            timeout: int = 180) -> AIResult:
+            timeout: int = 180, allow_write: bool = False) -> AIResult:
         started = time.time()
         if "结构化的问题描述" in prompt:
             data = {
@@ -93,7 +93,7 @@ class DeepSeekProvider(BaseProvider):
         self.model = (settings.get("deepseek.model") or "deepseek-chat").strip()
 
     def run(self, prompt: str, system: str = "", cwd: Optional[str] = None,
-            timeout: int = 180) -> AIResult:
+            timeout: int = 180, allow_write: bool = False) -> AIResult:
         if not self.api_key:
             raise AIError("未配置 DeepSeek API Key，请到「设置」里填写 deepseek.api_key")
         started = time.time()
@@ -151,21 +151,24 @@ class CliProvider(BaseProvider):
             )
         return found
 
-    def _command(self, prompt: str) -> list[str]:
+    def _command(self, prompt: str, allow_write: bool = False) -> list[str]:
         binary = self._bin()
         if self.name == "dsh":
             profile = (self.settings.get("dsh.profile") or "headless").strip()
             return [binary, "--profile", profile, prompt]
-        # claude
+        # claude：只读分析时白名单不含写工具；改代码时放开 Edit/Write 并自动接受编辑
+        tools = "Read,Grep,Glob" if not allow_write else "Read,Grep,Glob,Edit,Write"
         cmd = [binary, "-p", prompt, "--output-format", "json",
-               "--allowedTools", "Read,Grep,Glob"]
+               "--allowedTools", tools]
+        if allow_write:
+            cmd += ["--permission-mode", "acceptEdits"]
         model = (self.settings.get("claude.model") or "").strip()
         if model:
             cmd += ["--model", model]
         return cmd
 
     def run(self, prompt: str, system: str = "", cwd: Optional[str] = None,
-            timeout: int = 180) -> AIResult:
+            timeout: int = 180, allow_write: bool = False) -> AIResult:
         started = time.time()
         full_prompt = f"{system}\n\n{prompt}" if system else prompt
         workdir = cwd or (self.settings.get("repo.root") or "").strip() or None
@@ -173,7 +176,7 @@ class CliProvider(BaseProvider):
             workdir = None
         try:
             proc = subprocess.run(
-                self._command(full_prompt),
+                self._command(full_prompt, allow_write),
                 cwd=workdir,
                 capture_output=True,
                 text=True,
@@ -205,7 +208,8 @@ class CliProvider(BaseProvider):
 
 
 def run_ai(provider_name: str, prompt: str, system: str = "",
-           cwd: Optional[str] = None, timeout: Optional[int] = None) -> AIResult:
+           cwd: Optional[str] = None, timeout: Optional[int] = None,
+           allow_write: bool = False) -> AIResult:
     settings = get_settings()
     name = (provider_name or settings.get("ai.provider") or "mock").strip().lower()
     limit = int(timeout or settings.get("ai.timeout") or 180)
@@ -217,7 +221,8 @@ def run_ai(provider_name: str, prompt: str, system: str = "",
         provider = CliProvider(name, settings)
     else:
         raise AIError(f"不支持的 AI 执行器：{name}")
-    return provider.run(prompt, system=system, cwd=cwd, timeout=limit)
+    return provider.run(prompt, system=system, cwd=cwd, timeout=limit,
+                        allow_write=allow_write)
 
 
 def provider_names() -> list[str]:

@@ -85,12 +85,51 @@ cd /src/issue-hub/backend
 
 | 阶段 | 选择方式 | 原因 |
 |---|---|---|
-| 分析（找根因/给方案） | **多选目录**，可以直接选 `/src/gym-fold` 这种父目录 | agent 用 grep/read 全目录搜索，不依赖 git |
+| 分析（生成修复方案） | **多选目录**，可以直接选 `/src/gym-fold` 这种父目录 | agent 用 grep/read 全目录搜索，不依赖 git |
 | 改代码（worktree + diff） | **单选一个 git 仓库** | worktree / branch / merge 都是仓库级操作 |
 
-规划中的字段：`issue.code_scopes`（JSON 数组，分析用）+ `issue.target_repo`（字符串，修改用），
-详情页「操作解决」上方提供多选，记住上次选择。
+字段：`issue.code_scopes`（JSON 数组）+ `issue.target_repo`（字符串），详情页「操作解决」里选择并自动保存。
 
+设置项：
+
+- `code.roots`：候选目录，一行一个（详情页多选来源）
+- `code.ignore`：搜索跳过的目录名（默认 node_modules/target/dist/...）
+- `code.project_notes`：项目说明，拼进提示词让 AI 知道每个目录是什么
+
+## 操作解决闭环
+
+```
+生成修复方案（只读）
+  → 在 code_scopes 里定位根因，写 fix_plan
+开始修改（写）
+  → 在 target_repo 上建 worktree（分支 issue-<id>）
+  → agent（claude / dsh）只改 worktree 里的文件
+  → 收集 git diff（stat + 逐行）
+采纳并合并
+  → 在 worktree 提交
+  → 主仓库干净时 ff 合回当前分支；不干净则只提交并给出手工合并命令
+驳回
+  → 删除 worktree 和分支，状态回到「待处理」
+```
+
+护栏：
+
+- 只改 worktree，绝不直接动主仓库工作区
+- 不 push、不部署、不连生产库
+- 主仓库有未提交改动时**拒绝自动合并**
+- 只有 `claude` / `dsh` 能执行「开始修改」（DeepSeek API 只能出文本）
+
+相关 API：
+
+```
+GET  /api/code/roots              候选目录（带 isGit/exists）
+POST /api/issues/{id}/fix/apply   { provider, repo }  建 worktree 并让 agent 改
+GET  /api/issues/{id}/fix/diff    重新收集 diff
+POST /api/issues/{id}/fix/accept  { message, merge }  提交 +（可选）合并
+POST /api/issues/{id}/fix/reject  丢弃 worktree 与分支
+```
+
+## 数据
 ## 数据
 
 ```

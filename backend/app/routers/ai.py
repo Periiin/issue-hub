@@ -4,10 +4,13 @@
 """
 import json
 
+from pathlib import Path
+
 from fastapi import APIRouter, HTTPException
 
 from ..config import COMPLEXITIES, PRIORITIES, RUBRIC_VERSION, SEVERITIES
 from ..db import add_event, connect, get_settings, now
+from ..fix import ignore_list, project_notes
 from ..prompts import (QUALIFY_SYSTEM, FIX_SYSTEM, TRIAGE_SYSTEM, build_fix_prompt,
                        build_qualify_prompt, build_triage_prompt, extract_json)
 from ..schemas import AIRequest, FixRequest, QualifyConfirm
@@ -32,6 +35,29 @@ def _record_run(conn, issue_id: int, kind: str, result, ok: bool, error: str | N
          getattr(result, "duration_ms", 0), 1 if ok else 0, error,
          (getattr(result, "text", "") or "")[:20000], now()),
     )
+
+
+def _json_list(raw) -> list[str]:
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+        return [str(x) for x in data] if isinstance(data, list) else []
+    except json.JSONDecodeError:
+        return []
+
+
+def _common_cwd(scopes: list[str]) -> str | None:
+    """多个目录时取公共父目录，让 agent 能跨项目搜索；单目录直接用它。"""
+    if not scopes:
+        return None
+    if len(scopes) == 1:
+        return scopes[0]
+    import os
+    try:
+        return os.path.commonpath([str(Path(x).resolve()) for x in scopes])
+    except ValueError:
+        return None
 
 
 @router.post("/{issue_id}/qualify")
@@ -126,10 +152,12 @@ def make_fix_plan(issue_id: int, payload: FixRequest):
     if not issue.get("qualify_final"):
         raise HTTPException(400, "还没有确认过的问题描述，先完成定性")
     confirmed = json.loads(issue["qualify_final"])
-    repo_root = (get_settings().get("repo.root") or "").strip()
-    prompt = build_fix_prompt(confirmed, repo_root or "（未配置）")
+    scopes = _json_list(issue.get("code_scopes")) or [(get_settings().get("repo.root") or "").strip()]
+    scopes = [s for s in scopes if s]
+    cwd = _common_cwd(scopes)
+    prompt = build_fix_prompt(confirmed, scopes, ignore_list(), project_notes())
     try:
-        result = run_ai(payload.provider or "", prompt, FIX_SYSTEM, cwd=repo_root or None)
+        result = run_ai(payload.provider or "", prompt, FIX_SYSTEM, cwd=cwd)
         data = extract_json(result.text)
     except (AIError, ValueError) as ex:
         with connect() as conn:

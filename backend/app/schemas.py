@@ -10,6 +10,7 @@ class IssueCreate(BaseModel):
     source: str = "wechat"
     reporter: str = ""
     module: str = ""
+    code_scopes: list[str] = []
 
 
 class IssuePatch(BaseModel):
@@ -22,6 +23,10 @@ class IssuePatch(BaseModel):
     severity: Optional[str] = None
     complexity: Optional[str] = None
     priority: Optional[str] = None
+    # 分析用的代码目录（可多选，允许父目录）
+    code_scopes: Optional[list[str]] = None
+    # 改代码用的单个 git 仓库
+    target_repo: Optional[str] = None
 
 
 class AIRequest(BaseModel):
@@ -42,6 +47,18 @@ class QualifyConfirm(BaseModel):
 
 class FixRequest(BaseModel):
     provider: Optional[str] = None
+
+
+class FixApplyReq(BaseModel):
+    """开始改代码：在单个 git 仓库上建 worktree 让 agent 动手。"""
+    provider: Optional[str] = None
+    repo: Optional[str] = None
+    message: Optional[str] = None
+
+
+class FixAcceptReq(BaseModel):
+    message: Optional[str] = None
+    merge: bool = True
 
 
 class SettingsUpdate(BaseModel):

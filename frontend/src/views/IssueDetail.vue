@@ -199,18 +199,59 @@
           <span class="step-badge">3</span>
           <div>
             <h2>操作解决</h2>
-            <p>让 AI 在仓库里定位根因、给改动清单</p>
+            <p>分析可跨目录；改代码在独立 worktree 里进行，人工采纳才合并</p>
           </div>
         </div>
         <div class="panel-actions">
           <el-button type="warning" round :loading="fixing" @click="doFix">生成修复方案</el-button>
+          <el-button
+            v-if="targetRepo"
+            type="primary" round :loading="applying" :disabled="!canApply"
+            @click="doApply"
+          >开始修改</el-button>
         </div>
       </div>
 
-      <div class="notice">
-        当前版本只出方案，不改代码；改代码请走 worktree + 人工合并。
+      <!-- 代码范围（分析用，多选） -->
+      <div class="field-block">
+        <div class="field-head">
+          <span class="field-title">代码范围</span>
+          <span class="ih-muted">分析时搜索的目录，可多选（父目录也能选）</span>
+        </div>
+        <div class="scope-list">
+          <button
+            v-for="r in roots"
+            :key="r.path"
+            class="scope-chip"
+            :class="{ 'is-on': selectedScopes.includes(r.path), 'is-missing': !r.exists }"
+            @click="toggleScope(r.path)"
+          >
+            <span class="scope-name">{{ r.name }}</span>
+            <span v-if="r.isGit" class="scope-badge">git</span>
+            <span v-if="!r.exists" class="scope-badge scope-badge--warn">不存在</span>
+          </button>
+        </div>
       </div>
 
+      <!-- 目标仓库（改代码用，单选） -->
+      <div class="field-block">
+        <div class="field-head">
+          <span class="field-title">目标仓库</span>
+          <span class="ih-muted">改代码必须落到单个 git 仓库</span>
+        </div>
+        <el-select v-model="targetRepo" clearable placeholder="选择一个 git 仓库" class="repo-select" @change="saveRepo">
+          <el-option
+            v-for="r in gitRoots" :key="r.path" :value="r.path"
+            :label="`${r.name}　${r.path}`"
+          />
+        </el-select>
+      </div>
+
+      <div v-if="targetRepo && !canApply" class="apply-hint">
+        当前执行器 <b>{{ provider }}</b> 只能分析；改代码请切到 <b>claude</b> 或 <b>dsh</b>（在 ① 里切换）。
+      </div>
+
+      <!-- 分析结果 -->
       <div v-if="fixPlan" class="fix-plan">
         <div class="fix-row"><span class="fix-k">根因</span><span class="fix-v">{{ fixPlan.root_cause }}</span></div>
         <div v-if="fixPlan.files?.length" class="fix-row">
@@ -230,7 +271,42 @@
           <span class="fix-v"><ul><li v-for="(c, i) in fixPlan.risks" :key="i">{{ c }}</li></ul></span>
         </div>
       </div>
-      <el-empty v-else description="还没有修复方案" :image-size="70" />
+      <div v-else-if="!fixState" class="ih-muted fix-empty">还没有分析结果，点「生成修复方案」。</div>
+
+      <!-- worktree 结果 -->
+      <div v-if="fixState" class="worktree">
+        <div class="wt-head">
+          <div class="wt-meta">
+            <span class="wt-tag">worktree</span>
+            <code>{{ fixState.branch }}</code>
+            <span class="ih-muted">{{ fixState.worktree }}</span>
+          </div>
+          <div class="wt-actions">
+            <el-button size="small" round @click="refreshDiff">刷新 diff</el-button>
+            <el-button
+              v-if="!fixState.accepted"
+              size="small" round type="success" :loading="accepting" :disabled="diffEmpty || !diffData"
+              @click="doAccept"
+            >采纳并合并</el-button>
+            <el-button
+              v-if="!fixState.accepted"
+              size="small" round type="danger" plain :loading="rejecting" @click="doReject"
+            >驳回</el-button>
+          </div>
+        </div>
+
+        <div v-if="fixState.accepted" class="accepted-box">
+          <b>已采纳</b>
+          <span v-if="fixState.merge?.merged">已合并到 {{ fixState.merge.base_branch }}</span>
+          <span v-else>已提交到分支，需人工合并：<code>{{ fixState.merge?.command }}</code></span>
+        </div>
+
+        <div class="diff-stat">{{ diffData?.stat || fixState.diff_stat || '（暂无改动）' }}</div>
+        <pre v-if="diffData?.diff" class="diff-view"><code><span
+          v-for="(line, i) in diffLines" :key="i" :class="diffLineClass(line)"
+        >{{ line + '\n' }}</span></code></pre>
+        <div v-if="diffData?.truncated" class="ih-muted">diff 太长已截断，完整内容请到 worktree 查看。</div>
+      </div>
     </section>
 
     <!-- 时间线 -->
@@ -271,8 +347,9 @@ import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
-  confirmQualify, deleteAttachment, deleteIssue, fileUrl, getIssue, getSettings,
-  patchIssue, runFix, runQualify, runTriage, uploadAttachments
+  acceptFix, applyFix, confirmQualify, deleteAttachment, deleteIssue, fileUrl,
+  getCodeRoots, getFixDiff, getIssue, getSettings, patchIssue, rejectFix,
+  runFix, runQualify, runTriage, uploadAttachments, type CodeRoot
 } from '../api'
 
 const route = useRoute()
@@ -295,6 +372,18 @@ const confirming = ref(false)
 const triaging = ref(false)
 const fixing = ref(false)
 
+/* ===== ③ 操作解决：代码范围 / worktree / diff ===== */
+/** 设置里的代码目录候选 */
+const roots = ref<CodeRoot[]>([])
+/** 分析用（可多选），存到 issue.code_scopes */
+const selectedScopes = ref<string[]>([])
+/** 改代码用（单个 git 仓库），存到 issue.target_repo */
+const targetRepo = ref('')
+const diffData = ref<{ stat: string; diff: string; files: string[]; truncated: boolean } | null>(null)
+const applying = ref(false)
+const accepting = ref(false)
+const rejecting = ref(false)
+
 const q = reactive({
   title: '', phenomenon: '', repro_text: '', expected: '', actual: '',
   scope: '', module: '', uncertain_text: ''
@@ -302,6 +391,19 @@ const q = reactive({
 
 const triage = computed(() => issue.value?.triage || null)
 const fixPlan = computed(() => issue.value?.fix_plan || null)
+const fixState = computed(() => issue.value?.fix_state || null)
+const gitRoots = computed(() => roots.value.filter((r) => r.isGit && r.exists))
+const canApply = computed(() => !!targetRepo.value && ['claude', 'dsh'].includes(provider.value))
+const diffEmpty = computed(() => !diffData.value || !diffData.value.files?.length)
+const diffLines = computed(() => (diffData.value?.diff || '').split('\n'))
+
+const diffLineClass = (line: string) => {
+  if (line.startsWith('+++') || line.startsWith('---')) return 'dl-meta'
+  if (line.startsWith('+')) return 'dl-add'
+  if (line.startsWith('-')) return 'dl-del'
+  if (line.startsWith('@@')) return 'dl-hunk'
+  return ''
+}
 const imageUrls = computed(() =>
   attachments.value.filter((a) => (a.mime || '').startsWith('image/')).map((a) => fileUrl(a.path))
 )
@@ -342,7 +444,10 @@ const load = async () => {
   attachments.value = res.attachments
   events.value = res.events
   rawText.value = res.issue.raw_text || ''
+  selectedScopes.value = Array.isArray(res.issue.code_scopes) ? res.issue.code_scopes : []
+  targetRepo.value = res.issue.target_repo || ''
   fillQualifyForm(res.issue.qualify_final || res.issue.qualify_draft)
+  if (res.issue.fix_state) await loadDiff()
 }
 
 const saveRawText = async () => {
@@ -429,6 +534,82 @@ const doFix = async () => {
   }
 }
 
+/* ===== 代码范围 / worktree 操作 ===== */
+
+const toggleScope = async (path: string) => {
+  const next = selectedScopes.value.includes(path)
+    ? selectedScopes.value.filter((p) => p !== path)
+    : [...selectedScopes.value, path]
+  selectedScopes.value = next
+  await patchIssue(id.value, { code_scopes: next })
+}
+
+const saveRepo = async () => {
+  await patchIssue(id.value, { target_repo: targetRepo.value || '' })
+}
+
+const loadDiff = async () => {
+  if (!fixState.value) return
+  try {
+    const res = await getFixDiff(id.value)
+    diffData.value = res.diff
+  } catch {
+    diffData.value = null
+  }
+}
+
+const refreshDiff = async () => {
+  await loadDiff()
+  ElMessage.success('已刷新')
+}
+
+const doApply = async () => {
+  applying.value = true
+  try {
+    const res = await applyFix(id.value, { provider: provider.value, repo: targetRepo.value })
+    await load()
+    diffData.value = res.diff
+    if (res.diff?.empty) ElMessage.warning('AI 没有产生任何文件改动，看下它的说明')
+    else ElMessage.success(`已修改 ${res.diff.files.length} 个文件，请审阅 diff`)
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.detail || '修改失败')
+  } finally {
+    applying.value = false
+  }
+}
+
+const doAccept = async () => {
+  await ElMessageBox.confirm(
+    '将提交 worktree 里的改动，并在主仓库干净时自动合并。继续？', '采纳', { type: 'warning' })
+  accepting.value = true
+  try {
+    const res = await acceptFix(id.value, {})
+    await load()
+    await loadDiff()
+    if (res.merge?.merged) ElMessage.success(`已合并到 ${res.merge.base_branch}`)
+    else ElMessage.warning(res.merge?.reason || '已提交到分支，需人工合并')
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.detail || '采纳失败')
+  } finally {
+    accepting.value = false
+  }
+}
+
+const doReject = async () => {
+  await ElMessageBox.confirm('丢弃 worktree 和分支？改动会全部删除。', '驳回', { type: 'warning' })
+  rejecting.value = true
+  try {
+    await rejectFix(id.value)
+    await load()
+    diffData.value = null
+    ElMessage.success('已丢弃')
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.detail || '驳回失败')
+  } finally {
+    rejecting.value = false
+  }
+}
+
 const onPaste = (e: ClipboardEvent) => {
   const files = Array.from(e.clipboardData?.files || [])
   if (files.length) {
@@ -464,8 +645,12 @@ const removeIssue = async () => {
 
 watch(() => route.params.id, load)
 onMounted(async () => {
-  const s = await getSettings().catch(() => null)
+  const [s, r] = await Promise.all([
+    getSettings().catch(() => null),
+    getCodeRoots().catch(() => null)
+  ])
   if (s) providers.value = s.providers
+  if (r) roots.value = r.roots
   await load()
 })
 </script>
@@ -571,6 +756,57 @@ onMounted(async () => {
 .event-line { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; font-size: 13px; }
 .event-type { font-weight: 600; color: var(--ih-ink); }
 .event-note { color: var(--ih-sub); font-size: 12px; }
+
+/* ---------- ③ 代码范围 / worktree ---------- */
+.field-block { margin-bottom: 14px; }
+.field-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 8px; flex-wrap: wrap; }
+.field-title { font-size: 13px; font-weight: 600; color: var(--ih-ink); }
+.scope-list { display: flex; flex-wrap: wrap; gap: 8px; }
+.scope-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 6px 12px; border-radius: 999px; font-size: 13px;
+  border: 1px solid var(--ih-line); background: var(--ih-card);
+  color: var(--ih-sub); cursor: pointer; transition: all 0.16s ease;
+}
+.scope-chip:hover { border-color: var(--ih-line-strong); }
+.scope-chip.is-on {
+  border-color: var(--el-color-primary); background: var(--el-color-primary-light-9);
+  color: var(--el-color-primary); font-weight: 600;
+}
+.scope-chip.is-missing { opacity: 0.55; }
+.scope-badge {
+  font-size: 10px; padding: 0 5px; border-radius: 6px;
+  background: var(--ih-soft-2); color: var(--ih-sub);
+}
+.scope-chip.is-on .scope-badge { background: var(--ih-primary-soft); color: var(--el-color-primary); }
+.scope-badge--warn { background: var(--ih-warn-soft); color: var(--ih-warn-ink); }
+.repo-select { width: 100%; max-width: 460px; }
+.repo-hint { margin-left: 10px; font-size: 12px; color: var(--ih-sub); }
+.fix-empty { padding: 6px 0 2px; }
+.apply-hint {
+  padding: 8px 12px; border-radius: 10px; font-size: 12px; line-height: 1.6;
+  background: var(--ih-warn-soft); color: var(--ih-warn-ink); margin-bottom: 12px;
+}
+
+.worktree { margin-top: 14px; border-top: 1px dashed var(--ih-line); padding-top: 14px; }
+.wt-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+.wt-meta { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--ih-sub); flex-wrap: wrap; }
+.wt-tag { padding: 1px 8px; border-radius: 999px; background: var(--ih-soft-2); color: var(--ih-sub); font-size: 11px; }
+.accepted-box {
+  display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+  padding: 10px 12px; border-radius: 12px; font-size: 13px; margin-bottom: 10px;
+  background: var(--ih-success-soft); color: var(--ih-success-ink);
+}
+.diff-stat { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--ih-sub); white-space: pre-wrap; margin-bottom: 8px; }
+.diff-view {
+  max-height: 380px; overflow: auto; margin: 0; padding: 10px 12px;
+  background: var(--ih-soft); border: 1px solid var(--ih-line); border-radius: 12px;
+}
+.diff-view code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; line-height: 1.6; white-space: pre; }
+.dl-add { display: block; color: #12b76a; }
+.dl-del { display: block; color: #f04438; }
+.dl-hunk { display: block; color: #7c3aed; }
+.dl-meta { display: block; color: var(--ih-sub); }
 
 @media (max-width: 768px) {
   .hero { padding: 16px; }

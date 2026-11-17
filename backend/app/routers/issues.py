@@ -85,7 +85,8 @@ def get_issue(issue_id: int):
             "FROM ai_run WHERE issue_id = ? ORDER BY id DESC LIMIT 20", (issue_id,)).fetchall())
         events = list_rows(conn.execute(
             "SELECT * FROM event WHERE issue_id = ? ORDER BY id DESC", (issue_id,)).fetchall())
-    for key in ("qualify_draft", "qualify_final", "triage", "fix_plan"):
+    for key in ("qualify_draft", "qualify_final", "triage", "fix_plan",
+                "code_scopes", "fix_state"):
         issue[key] = _json_or_none(issue.get(key))
     return {"issue": issue, "attachments": attachments, "runs": runs, "events": events}
 
@@ -95,6 +96,12 @@ def patch_issue(issue_id: int, payload: IssuePatch):
     data = payload.model_dump(exclude_none=True)
     if "status" in data and not valid_status(data["status"]):
         raise HTTPException(400, f"非法状态：{data['status']}")
+    if "code_scopes" in data:
+        data["code_scopes"] = json.dumps(data["code_scopes"], ensure_ascii=False)
+    if "target_repo" in data and data["target_repo"]:
+        from ..fix import is_repo_root
+        if not is_repo_root(data["target_repo"]):
+            raise HTTPException(400, "target_repo 必须是 git 仓库根目录")
     if not data:
         return {"ok": True}
     data["updated_at"] = now()

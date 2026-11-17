@@ -84,7 +84,16 @@ TRIAGE_TEMPLATE = """请基于下面这条**已由人工确认**的问题描述�
 
 FIX_SYSTEM = "你是这个项目的开发负责人，负责给出可执行的修复方案。输出必须是合法 JSON，不要输出 Markdown 代码块标记。"
 
-FIX_TEMPLATE = """针对下面这条问题，请在代码仓库中定位相关实现并给出修复方案。仓库根目录：{repo_root}
+FIX_TEMPLATE = """针对下面这条问题，请在代码仓库中定位相关实现并给出修复方案。
+
+【可搜索的代码目录】
+{scopes}
+
+【项目说明】
+{project_notes}
+
+【搜索时请跳过这些目录】（体量大且与业务无关）
+{ignore}
 
 【问题描述】
 {description}
@@ -106,6 +115,41 @@ FIX_TEMPLATE = """针对下面这条问题，请在代码仓库中定位相关�
 }}
 """
 
+APPLY_SYSTEM = (
+    "你是这个项目的开发工程师，现在要直接修改代码修复问题。"
+    "只改必要的地方，不要重构、不要顺手改无关文件。最后用中文简要说明改了什么。"
+)
+
+APPLY_TEMPLATE = """在下面这个独立的工作目录里修复问题（这是一个 git worktree，可以放心修改）：
+
+工作目录：{worktree}
+
+【问题描述】
+{description}
+
+【已经确认的修复思路（可参考，也可自行判断）】
+{plan}
+
+【硬性约束】
+1. **只能修改 {worktree} 目录下的文件**，不要碰其它仓库或父目录。
+2. **不要执行 git commit / git push / git checkout / git reset**，改动留在工作区即可，由人工审阅后提交。
+3. 不要改动依赖锁文件、不要升级依赖、不要改构建脚本，除非问题本身就在那里。
+4. 不要编写或修改测试来"绕过"问题；如果仓库已有相关测试，可以补一条最直接的回归用例。
+5. 改完如果有把握，跑一次最小编译/类型检查（如 `mvn -q -pl <module> compile`、`npx vue-tsc --noEmit`），把结果写进总结；跑不动就跳过，不要卡住。
+6. 如果判断不该改代码（比如是配置或数据问题），直接说明原因，不要硬改。
+
+【输出】
+用中文给出：
+- 根因（一两句）
+- 改了哪些文件、每处改了什么
+- 怎么验证
+- 有没有遗留风险
+"""
+
+
+def _scopes_block(scopes: list[str]) -> str:
+    return "\n".join(f"- {s}" for s in scopes) if scopes else "- （未配置）"
+
 
 def build_qualify_prompt(issue: dict[str, Any], attachments: list[str]) -> str:
     return QUALIFY_TEMPLATE.format(
@@ -124,10 +168,22 @@ def build_triage_prompt(qualify_final: dict[str, Any]) -> str:
     )
 
 
-def build_fix_prompt(qualify_final: dict[str, Any], repo_root: str) -> str:
+def build_fix_prompt(qualify_final: dict[str, Any], scopes: list[str] | None = None,
+                     ignore: list[str] | None = None, project_notes: str = "") -> str:
     return FIX_TEMPLATE.format(
-        repo_root=repo_root,
+        scopes=_scopes_block(scopes or []),
+        ignore="、".join(ignore or []) or "（无）",
+        project_notes=project_notes or "（未配置）",
         description=json.dumps(qualify_final, ensure_ascii=False, indent=2),
+    )
+
+
+def build_apply_prompt(qualify_final: dict[str, Any], worktree: str,
+                       plan: dict[str, Any] | None = None) -> str:
+    return APPLY_TEMPLATE.format(
+        worktree=worktree,
+        description=json.dumps(qualify_final, ensure_ascii=False, indent=2),
+        plan=json.dumps(plan or {}, ensure_ascii=False, indent=2) if plan else "（无，自行判断）",
     )
 
 

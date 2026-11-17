@@ -274,9 +274,9 @@ def make_fix_plan(issue_id: int, provider: str = "", code_scope: str = "") -> di
             cwd = str(Path(*Path(scopes[0]).parts[:len(Path(scopes[0]).parts) - 1]))
         except Exception:
             cwd = root
-    prompt = build_fix_prompt(confirmed, root or "（未配置）")
-    if scopes:
-        prompt += "\n\n【可搜索的代码目录】\n" + "\n".join(f"- {s}" for s in scopes)
+    from app.fix import ignore_list, project_notes
+    prompt = build_fix_prompt(confirmed, scopes or ([root] if root else []),
+                              ignore_list(), project_notes())
     try:
         result = run_ai(provider, prompt, FIX_SYSTEM, cwd=cwd or None)
         data = extract_json(result.text)
@@ -311,6 +311,85 @@ def weekly_report() -> str:
                          f"　{row['module'] or '-'}　{row['created_at'][:10]}")
         lines.append("")
     return "\n".join(lines)
+
+
+@mcp.tool()
+def list_code_roots() -> dict:
+    """列出设置里配置的代码目录，带 isGit/exists，便于决定分析范围和目标仓库。"""
+    from app.fix import ignore_list, list_code_roots as _roots, project_notes
+    return {"roots": _roots(), "ignore": ignore_list(), "projectNotes": project_notes()}
+
+
+@mcp.tool()
+def get_fix_diff(issue_id: int) -> dict:
+    """查看某个 issue 的 worktree 当前 diff（人工改过也会体现）。"""
+    from app.fix import FixError, collect_diff
+    row = _issue(issue_id)
+    if not row:
+        return {"error": f"问题 #{issue_id} 不存在"}
+    state = _parse(row.get("fix_state"))
+    if not state:
+        return {"error": "还没有开始修改（fix_state 为空）"}
+    try:
+        return {"state": state, "diff": collect_diff(state["worktree"])}
+    except FixError as ex:
+        return {"error": str(ex)}
+
+
+@mcp.tool()
+def accept_fix(issue_id: int, message: str = "", merge: bool = True) -> dict:
+    """采纳 worktree 改动：提交到分支，主仓库干净时 ff 合并。"""
+    from app.fix import FixError, commit_all, merge_to_base
+    row = _issue(issue_id)
+    if not row:
+        return {"error": f"问题 #{issue_id} 不存在"}
+    state = _parse(row.get("fix_state"))
+    if not state:
+        return {"error": "还没有开始修改"}
+    if state.get("accepted"):
+        return {"ok": True, "already": True}
+    msg = message.strip() or f"fix(issue-{issue_id}): {row['title']}"
+    try:
+        if not commit_all(state["worktree"], msg):
+            return {"error": "worktree 里没有改动"}
+    except FixError as ex:
+        return {"error": str(ex)}
+    result = {"merged": False, "reason": "未请求合并"}
+    if merge:
+        try:
+            result = merge_to_base(state["repo"], state["branch"])
+        except FixError as ex:
+            result = {"merged": False, "reason": str(ex),
+                      "command": f"git -C {state['repo']} merge {state['branch']}"}
+    state.update({"accepted": True, "accepted_at": now(), "commit_message": msg, "merge": result})
+    with connect() as conn:
+        conn.execute("UPDATE issue SET fix_state = ?, status = '待验收', updated_at = ? WHERE id = ?",
+                     (json.dumps(state, ensure_ascii=False), now(), issue_id))
+        add_event(conn, issue_id, "fix_accept", from_status=row["status"], to_status="待验收",
+                  note="MCP 采纳")
+    return {"ok": True, "merge": result}
+
+
+@mcp.tool()
+def reject_fix(issue_id: int) -> dict:
+    """丢弃 worktree 和分支，状态回到「待处理」。"""
+    from app.fix import drop_worktree
+    row = _issue(issue_id)
+    if not row:
+        return {"error": f"问题 #{issue_id} 不存在"}
+    state = _parse(row.get("fix_state"))
+    if not state:
+        return {"ok": True}
+    try:
+        drop_worktree(state["repo"], issue_id)
+    except Exception:
+        pass
+    with connect() as conn:
+        conn.execute("UPDATE issue SET fix_state = NULL, status = '待处理', updated_at = ? WHERE id = ?",
+                     (now(), issue_id))
+        add_event(conn, issue_id, "fix_reject", from_status=row["status"], to_status="待处理",
+                  note="MCP 驳回")
+    return {"ok": True}
 
 
 if __name__ == "__main__":

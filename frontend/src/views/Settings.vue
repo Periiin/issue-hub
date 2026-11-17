@@ -26,6 +26,37 @@
       </el-radio-group>
     </section>
 
+    <!-- 代码范围 -->
+    <section class="panel ih-card">
+      <div class="panel-head">
+        <div class="panel-title">
+          <span class="step-badge step-badge--gray">&lt;/&gt;</span>
+          <div>
+            <h2>代码范围</h2>
+            <p>分析时可多选目录（含父目录）；改代码只能选其中的 git 仓库</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="field-grid">
+        <label class="field field--wide">
+          <span class="field-label">候选目录（一行一个）</span>
+          <el-input v-model="form['code.roots']" type="textarea" :rows="5" resize="none" />
+          <span class="field-hint">详情页「代码范围」的多选来自这里；带 .git 的目录会被标成可修改的目标仓库</span>
+        </label>
+        <label class="field field--wide">
+          <span class="field-label">搜索跳过的目录（逗号分隔）</span>
+          <el-input v-model="form['code.ignore']" />
+          <span class="field-hint">默认排除 node_modules / target / dist / backup / import-json 等大目录</span>
+        </label>
+        <label class="field field--wide">
+          <span class="field-label">项目说明</span>
+          <el-input v-model="form['code.project_notes']" type="textarea" :rows="5" resize="none" />
+          <span class="field-hint">写给 AI 看：每个目录是什么项目，避免它在父目录里乱撞</span>
+        </label>
+      </div>
+    </section>
+
     <!-- 执行器 -->
     <section class="panel ih-card">
       <div class="panel-head">

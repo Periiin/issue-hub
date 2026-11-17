@@ -22,6 +22,9 @@ CREATE TABLE IF NOT EXISTS issue (
     priority        TEXT,
     prompt_version  TEXT,
     fix_plan        TEXT,                        -- 「操作解决」生成的方案/差异说明
+    code_scopes     TEXT,                        -- JSON 数组：分析用代码目录（可多选）
+    target_repo     TEXT,                        -- 单个 git 仓库：改代码用
+    fix_state       TEXT,                        -- JSON：worktree/branch/diff 等运行时状态
     created_at      TEXT NOT NULL,
     updated_at      TEXT NOT NULL
 );
@@ -88,6 +91,15 @@ def init_db() -> None:
     ATTACH_DIR.mkdir(parents=True, exist_ok=True)
     with connect() as conn:
         conn.executescript(SCHEMA)
+        # 老库补列：SQLite 没有 IF NOT EXISTS 加列，用 table_info 判断
+        existing = {r["name"] for r in conn.execute("PRAGMA table_info(issue)").fetchall()}
+        for column, ddl in (
+            ("code_scopes", "ALTER TABLE issue ADD COLUMN code_scopes TEXT"),
+            ("target_repo", "ALTER TABLE issue ADD COLUMN target_repo TEXT"),
+            ("fix_state", "ALTER TABLE issue ADD COLUMN fix_state TEXT"),
+        ):
+            if column not in existing:
+                conn.execute(ddl)
         # 默认配置只补不覆盖，避免每次启动把用户改过的值重置
         for key, value in DEFAULT_SETTINGS.items():
             conn.execute("INSERT OR IGNORE INTO setting(key, value) VALUES (?, ?)", (key, value))

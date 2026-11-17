@@ -44,6 +44,23 @@ DEFAULT_SETTINGS = {
     # Claude Code CLI
     "claude.bin": "claude",
     "claude.model": "",
-    # AI 分析代码时的工作目录（多个仓库时填父目录，或填单个仓库）
+    # AI 分析代码时的工作目录（单目录，兼容旧配置）
     "repo.root": "/src/gym-fold",
+    # 代码范围候选：一行一个目录，详情页多选从这里来（可含父目录）
+    "code.roots": "\n".join([
+        "/src/gym-fold/gym-java-1",
+        "/src/gym-fold/gym-vue-1",
+        "/src/gym-fold/gym-admin-uniapp",
+        "/src/gym-uniapp",
+        "/src/gym-fold",
+    ]),
+    # 搜索时跳过的目录名（逗号分隔）：这些目录体量大且与业务无关
+    "code.ignore": "node_modules,target,dist,build,backup,import-json,.git,.venv,.venv-mcp,worktrees",
+    # 项目说明：告诉 AI 每个目录是什么，避免在父目录里乱撞
+    "code.project_notes": "\n".join([
+        "gym-java-1       后端（Spring Boot + MyBatis-Plus）",
+        "gym-vue-1        PC 管理端（Vue3 + Element Plus）",
+        "gym-uniapp       会员端小程序（uni-app）",
+        "gym-admin-uniapp 管理端小程序（uni-app）",
+    ]),
 }

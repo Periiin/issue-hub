@@ -72,3 +72,29 @@ export const saveSettings = (values: Record<string, any>) =>
   api.put('/settings', { values }).then((r) => r.data)
 
 export const fileUrl = (path: string) => `/files/${path}`
+
+// ---------- 操作解决（worktree） ----------
+
+export interface CodeRoot {
+  path: string
+  name: string
+  exists: boolean
+  isGit: boolean
+  repoRoot: string | null
+}
+
+export const getCodeRoots = () =>
+  api.get<{ roots: CodeRoot[]; ignore: string[]; projectNotes: string }>('/code/roots')
+    .then((r) => r.data)
+
+export const applyFix = (id: number, data: { provider?: string; repo?: string; message?: string }) =>
+  api.post(`/issues/${id}/fix/apply`, data).then((r) => r.data)
+
+export const getFixDiff = (id: number) =>
+  api.get(`/issues/${id}/fix/diff`).then((r) => r.data)
+
+export const acceptFix = (id: number, data: { message?: string; merge?: boolean }) =>
+  api.post(`/issues/${id}/fix/accept`, data).then((r) => r.data)
+
+export const rejectFix = (id: number) =>
+  api.post(`/issues/${id}/fix/reject`).then((r) => r.data)
