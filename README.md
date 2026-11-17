@@ -1,0 +1,141 @@
+# Issue Hub · 甲方问题跟踪
+
+记录甲方通过微信/电话反馈的问题 → AI 整理成结构化描述（定性）→ 人工确认 → AI 定级（S/P）→ 生成修复方案。
+单机自托管，手机浏览器也能用。
+
+访问：**http://192.168.110.12:8090/**
+
+## 快速开始
+
+```bash
+cd /src/issue-hub
+./start.sh          # 首次会自动装依赖、构建前端
+# 后台跑：nohup ./start.sh > /tmp/issuehub.log 2>&1 &
+./stop.sh           # 停止
+```
+
+开发前端（热更新）：`cd frontend && npm run dev`（5175，自动代理 /api、/files 到 8090）。
+
+## 使用流程
+
+1. **新建问题**：粘贴甲方原话，截图直接 `Ctrl+V`（微信截图）或选文件；填提出人/模块。
+2. **① AI 定性**：选执行器 → 点「AI 定性」→ 得到结构化描述（现象/复现/期望/实际/范围/待确认）。
+3. **人工确认**：改完点「确认定性，进入定级」。**没确认不能定级**，避免垃圾进垃圾出。
+4. **② AI 定级**：给出 S1~S4（影响）、简单/中等/复杂（改动成本）、P0~P3（优先级）和依据。
+   结果可以手动改，改完立即保存。
+5. **③ 操作解决**：让 agent 在 `repo.root` 里定位根因、列改动清单。
+   **当前版本不改代码**，只给方案；改代码建议在 worktree 里做、人工合并。
+6. **导出**：单条「导出 Markdown」，列表页「导出周报」按优先级分组。
+
+## AI 执行器
+
+在「设置」里选默认执行器，单次操作也可以临时切换（详情页有下拉框）。
+
+| 执行器 | 说明 | 需要什么 |
+|---|---|---|
+| `mock` | 返回固定假数据，用来验证流程，不花额度 | 无 |
+| `deepseek` | 调 DeepSeek OpenAI 兼容接口，快、便宜，**看不到代码** | API Key |
+| `dsh` | `dsh --profile headless "<任务>"`，同机可读仓库 | 本机装好 dsh |
+| `claude` | `claude -p "<任务>"`，同机可读仓库（只读工具白名单） | 本机装好 claude |
+
+提示词在 `backend/app/prompts.py`，定级规则带版本号（`RUBRIC_VERSION`），改规则时递增即可追溯。
+
+## 主题（亮 / 暗）
+
+- 右上角月亮/太阳按钮一键切换；设置页可选「浅色 / 深色 / 跟随系统」，选择存 `localStorage.ih-theme`
+- 实现：`<html class="dark">` 同时驱动 Element Plus 暗色变量和自定义变量（`frontend/src/styles.css`）
+- **新增页面必须用变量，不要写死色值**：
+  `--ih-bg` 页面底 · `--ih-card` 卡片底 · `--ih-soft` / `--ih-soft-2` 浅填充 · `--ih-ink` 主文字 ·
+  `--ih-sub` 次文字 · `--ih-line` 描边 · `--ih-primary-soft` / `--ih-warn-soft` / `--ih-success-soft` 语义底色
+- 自检：`?` 不传参，点右上角切到深色，逐页看是否有白底/黑字硬编码残留
+
+## MCP：让 AI 会话直接读写 issue
+
+已注册到 `~/.zcode/cli/config.json`（`mcp.servers.issue-hub`），**重启 ZCode 生效**；之后会话里会出现
+`mcp__issue-hub__*` 工具，可以直接说「把这周的 issue 过一遍，按 P0-P3 排好」。
+
+提供的工具：
+
+| 工具 | 作用 |
+|---|---|
+| `list_issues` | 按状态/优先级/模块/关键词列问题，带各状态数量 |
+| `get_issue` | 单条完整信息（原文、确认后的描述、定级、修复方案、附件绝对路径、时间线） |
+| `create_issue` | 新建问题 |
+| `update_issue` | 改状态/标题/模块/提出人/等级/复杂度/优先级 |
+| `add_note` | 加一条时间线备注 |
+| `run_qualify` | 跑 AI 定性（草稿） |
+| `confirm_qualify` | 确认定性 → 待定级 |
+| `run_triage` | 跑 AI 定级 → 待处理 |
+| `make_fix_plan` | 在代码目录里定位根因、给方案（只读） |
+| `weekly_report` | 输出周报 Markdown |
+
+MCP 直接读 SQLite，**不依赖 Web 服务是否在跑**。用的是独立 venv `.venv-mcp`，
+避免和 FastAPI 抢 `starlette` 版本。
+
+手动验证：
+
+```bash
+cd /src/issue-hub/backend
+.venv-mcp/bin/python /tmp/mcp_client_test.py    # 需要一个用官方 SDK 写的客户端脚本
+```
+
+## 代码范围（分析 vs 修改）
+
+分析只读，允许跨项目；修改必须落到具体 git 仓库：
+
+| 阶段 | 选择方式 | 原因 |
+|---|---|---|
+| 分析（找根因/给方案） | **多选目录**，可以直接选 `/src/gym-fold` 这种父目录 | agent 用 grep/read 全目录搜索，不依赖 git |
+| 改代码（worktree + diff） | **单选一个 git 仓库** | worktree / branch / merge 都是仓库级操作 |
+
+规划中的字段：`issue.code_scopes`（JSON 数组，分析用）+ `issue.target_repo`（字符串，修改用），
+详情页「操作解决」上方提供多选，记住上次选择。
+
+## 数据
+
+```
+data/issuehub.db          SQLite 主库（备份就拷这个文件）
+data/attachments/<id>/    截图、PDF
+```
+
+> 无登录鉴权，默认只在内网用。要挂到公网请先套 nginx basic auth 或加访问令牌。
+
+## API（前端用到的都在这里）
+
+```
+GET    /api/issues?status=&priority=&module=&q=
+POST   /api/issues                        {title,raw_text,source,reporter,module}
+GET    /api/issues/{id}                   详情（含附件/运行记录/时间线）
+PATCH  /api/issues/{id}                   改标题/描述/状态/定级字段
+DELETE /api/issues/{id}
+POST   /api/issues/{id}/attachments       multipart files[]
+DELETE /api/issues/{id}/attachments/{aid}
+POST   /api/issues/{id}/qualify           {provider?}  → 定性草稿
+POST   /api/issues/{id}/qualify/confirm   人工确认 → 待定级
+POST   /api/issues/{id}/triage            {provider?}  → 定级 → 待处理
+POST   /api/issues/{id}/fix               {provider?}  → 修复方案
+GET    /api/issues/{id}/export            Markdown
+GET    /api/report/weekly                 周报
+GET/PUT /api/settings
+```
+
+## 目录
+
+```
+backend/app/
+  main.py        FastAPI 入口（同时托管前端 dist）
+  db.py          SQLite + 表结构
+  providers.py   AI 执行器（mock/deepseek/dsh/claude）
+  prompts.py     定性/定级/修复提示词 + JSON 解析
+  routers/       issues / ai / report / settings
+frontend/src/
+  views/         IssueList / IssueDetail / Settings
+  api.ts         接口封装
+```
+
+## 下一步（还没做）
+
+- 「操作解决」接 worktree：建分支 → agent 改代码 → 出 diff → 人工采纳才合并
+- MCP server：让 ZCode 会话直接读写 issue 库（现在只能通过网页/API）
+- 附件 OCR / 多模态读图（目前 claude/dsh 能读图，deepseek 只能看文字）
+- 简单鉴权、甲方只读分享链接
