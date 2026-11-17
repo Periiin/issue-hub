@@ -83,18 +83,70 @@ export interface CodeRoot {
   repoRoot: string | null
 }
 
+/** 可做 worktree 的 git 仓库根（后端按 repoRoot 去重） */
+export interface TargetRepo {
+  path: string
+  name: string
+  exists: boolean
+  isGit: boolean
+  /** 该仓库覆盖的、已配置为代码范围的子目录 */
+  covers: string[]
+}
+
 export const getCodeRoots = () =>
-  api.get<{ roots: CodeRoot[]; ignore: string[]; projectNotes: string }>('/code/roots')
+  api.get<{ roots: CodeRoot[]; ignore: string[]; projectNotes: string; targetRepos: TargetRepo[] }>('/code/roots')
     .then((r) => r.data)
 
-export const applyFix = (id: number, data: { provider?: string; repo?: string; message?: string }) =>
-  api.post(`/issues/${id}/fix/apply`, data).then((r) => r.data)
+/** 单个仓库的 worktree 状态（多仓库时 fix_state.repos 的每个值） */
+export interface RepoFixState {
+  repo: string
+  name?: string
+  worktree?: string
+  branch?: string
+  base_branch?: string
+  base_commit?: string
+  status?: 'changed' | 'unchanged' | 'failed'
+  error?: string
+  provider?: string
+  duration_ms?: number
+  summary?: string
+  diff_stat?: string
+  files?: string[]
+  accepted?: boolean
+  accepted_at?: string
+  commit_message?: string
+  merge?: { merged?: boolean; base_branch?: string; reason?: string; command?: string }
+  updated_at?: string
+}
 
-export const getFixDiff = (id: number) =>
-  api.get(`/issues/${id}/fix/diff`).then((r) => r.data)
+export interface FixState {
+  repos: Record<string, RepoFixState>
+  context?: string
+  updated_at?: string
+}
 
-export const acceptFix = (id: number, data: { message?: string; merge?: boolean }) =>
-  api.post(`/issues/${id}/fix/accept`, data).then((r) => r.data)
+export const applyFix = (id: number, data: { provider?: string; repos?: string[]; message?: string }) =>
+  api.post<{ state: FixState; diffs: Record<string, any>; context: string }>(`/issues/${id}/fix/apply`, data)
+    .then((r) => r.data)
 
-export const rejectFix = (id: number) =>
-  api.post(`/issues/${id}/fix/reject`).then((r) => r.data)
+export const getFixDiff = (id: number, repo?: string) =>
+  api.get<{ state: FixState; diffs: Record<string, any> }>(`/issues/${id}/fix/diff`, { params: repo ? { repo } : {} })
+    .then((r) => r.data)
+
+export const acceptFix = (id: number, data: { repo?: string; message?: string; merge?: boolean }) =>
+  api.post<{ ok: boolean; results: Record<string, any>; state: FixState }>(`/issues/${id}/fix/accept`, data)
+    .then((r) => r.data)
+
+export const rejectFix = (id: number, data: { repo?: string } = {}) =>
+  api.post(`/issues/${id}/fix/reject`, data).then((r) => r.data)
+
+// ---------- 修复上下文（边界文件） ----------
+
+export const getFixContext = (id: number) =>
+  api.get<{ text: string; path: string }>(`/issues/${id}/context`).then((r) => r.data)
+
+export const saveFixContext = (id: number, text: string) =>
+  api.put<{ ok: boolean; path: string }>(`/issues/${id}/context`, { text }).then((r) => r.data)
+
+export const regenerateFixContext = (id: number) =>
+  api.post<{ ok: boolean; text: string; path: string }>(`/issues/${id}/context/regenerate`).then((r) => r.data)

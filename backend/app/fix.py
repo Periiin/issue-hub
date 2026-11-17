@@ -6,6 +6,7 @@
 - 采纳时先检查主仓库是否干净，不干净就只提交到分支并给出合并命令
 """
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -60,21 +61,39 @@ def is_clean(repo: str) -> bool:
     return code == 0 and not out
 
 
-def worktree_path(issue_id: int) -> Path:
-    return WORKTREES_DIR / f"issue-{issue_id}"
+def repo_slug(repo: str) -> str:
+    """把仓库路径转成可做目录名/分支名的短标识。
+
+    多仓库时同一个 issue 会有多个 worktree，必须靠这个区分。
+    例：E:/project/turtles -> turtles；同名冲突时调用方再加序号。
+    """
+    p = Path(repo)
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", p.name).strip("-") or "repo"
+    return slug.lower()
 
 
-def branch_name(issue_id: int) -> str:
-    return f"issue-{issue_id}"
+def worktree_path(issue_id: int, repo: str | None = None) -> Path:
+    """worktree 路径。传 repo 时为多仓库布局：issue-<id>/<repoSlug>。"""
+    base = WORKTREES_DIR / f"issue-{issue_id}"
+    if repo is None:
+        return base
+    return base / repo_slug(repo)
+
+
+def branch_name(issue_id: int, repo: str | None = None) -> str:
+    if repo is None:
+        return f"issue-{issue_id}"
+    return f"issue-{issue_id}-{repo_slug(repo)}"
 
 
 def create_worktree(repo: str, issue_id: int) -> dict:
-    """在 repo 上建独立 worktree（分支 issue-<id>），返回位置信息。"""
+    """在 repo 上建独立 worktree（分支 issue-<id>-<slug>），返回位置信息。"""
     if not is_repo_root(repo):
         raise FixError(f"{repo} 不是 git 仓库根目录，不能作为修改目标")
-    wt = worktree_path(issue_id)
-    branch = branch_name(issue_id)
+    wt = worktree_path(issue_id, repo)
+    branch = branch_name(issue_id, repo)
     WORKTREES_DIR.mkdir(parents=True, exist_ok=True)
+    wt.parent.mkdir(parents=True, exist_ok=True)
 
     # 清理上一次的残留（重复点「开始修改」时）
     if wt.exists():
@@ -137,13 +156,29 @@ def merge_to_base(repo: str, branch: str) -> dict:
 
 
 def drop_worktree(repo: str, issue_id: int) -> None:
-    wt = worktree_path(issue_id)
-    branch = branch_name(issue_id)
+    """清理单个仓库的 worktree + 分支，并顺手删掉空的 issue 目录。"""
+    wt = worktree_path(issue_id, repo)
+    branch = branch_name(issue_id, repo)
     if Path(repo).exists():
         _git(["worktree", "remove", "--force", str(wt)], repo)
         _git(["worktree", "prune"], repo)
         _git(["branch", "-D", branch], repo)
     shutil.rmtree(wt, ignore_errors=True)
+    # issue-<id> 目录空了就一起删掉，避免留一堆空目录
+    base = worktree_path(issue_id)
+    try:
+        if base.exists() and not any(base.iterdir()):
+            base.rmdir()
+    except OSError:
+        pass
+
+
+def drop_all_worktrees(issue_id: int, repos: list[str]) -> None:
+    for repo in repos or []:
+        try:
+            drop_worktree(repo, issue_id)
+        except Exception:
+            pass
 
 
 # ---------------- 代码范围 ----------------
@@ -171,6 +206,33 @@ def list_code_roots() -> list[dict]:
 def ignore_list() -> list[str]:
     raw = get_settings().get("code.ignore") or ""
     return [s.strip() for s in raw.split(",") if s.strip()]
+
+
+def list_target_repos() -> list[dict]:
+    """可作为「改代码」目标的 git 仓库根（去重）。
+
+    和 list_code_roots 的区别：代码范围可能是某个大仓库下的子目录
+    （如 gym-fold/gym-vue-1），这些子目录不是仓库根，不能做 worktree；
+    但它们的 repoRoot 是。这里按 repoRoot 归并，并记录每个仓库
+    覆盖了哪些已配置的代码目录，前端据此提示「范围与目标仓库不匹配」。
+    """
+    roots = list_code_roots()
+    by_repo: dict[str, dict] = {}
+    for r in roots:
+        root = r.get("repoRoot")
+        if not root:
+            continue
+        entry = by_repo.setdefault(root, {
+            "path": root,
+            "name": Path(root).name,
+            "exists": Path(root).is_dir(),
+            "isGit": True,
+            "covers": [],
+        })
+        # 子目录归到 covers；仓库根本身不算「覆盖的子项目」
+        if Path(r["path"]).resolve() != Path(root).resolve():
+            entry["covers"].append(r["path"])
+    return sorted(by_repo.values(), key=lambda x: (not x["exists"], x["name"].lower()))
 
 
 def project_notes() -> str:

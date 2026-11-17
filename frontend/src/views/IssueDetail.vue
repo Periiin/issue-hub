@@ -233,23 +233,87 @@
         </div>
       </div>
 
-      <!-- 目标仓库（改代码用，单选） -->
+      <!-- 目标仓库（改代码用，多选；随代码范围自动带出） -->
       <div class="field-block">
         <div class="field-head">
           <span class="field-title">目标仓库</span>
-          <span class="ih-muted">改代码必须落到单个 git 仓库</span>
+          <span class="ih-muted">勾代码范围会自动带出对应仓库，可多个</span>
         </div>
-        <el-select v-model="targetRepo" clearable placeholder="选择一个 git 仓库" class="repo-select" @change="saveRepo">
-          <el-option
-            v-for="r in gitRoots" :key="r.path" :value="r.path"
-            :label="`${r.name}　${r.path}`"
-          />
-        </el-select>
+        <div class="scope-list">
+          <button
+            v-for="r in targetRepos"
+            :key="r.path"
+            class="scope-chip"
+            :class="{ 'is-on': isRepoSelected(r.path), 'is-missing': !r.exists }"
+            @click="toggleRepo(r.path)"
+          >
+            <span class="scope-name">{{ r.name }}</span>
+            <span v-if="r.covers?.length" class="scope-badge">
+              {{ r.covers.length }} 子项目
+            </span>
+            <span v-if="!r.exists" class="scope-badge scope-badge--warn">不存在</span>
+          </button>
+        </div>
+        <div v-if="selectedRepos.length" class="repo-detail">
+          <div v-for="p in uniqRepos" :key="p" class="repo-detail-row">
+            <code>{{ p }}</code>
+          </div>
+        </div>
       </div>
 
-      <div v-if="targetRepo && !canApply" class="apply-hint">
+      <!-- 范围与目标仓库不一致时的提示 -->
+      <div v-if="outOfRepoScopes.length" class="scope-warn">
+        <b>代码范围与目标仓库不匹配</b>
+        <div class="scope-warn-body">
+          这些目录不在已选目标仓库内，AI 在 worktree 里无法修改：
+          <code v-for="s in outOfRepoScopes" :key="s">{{ s }}</code>
+        </div>
+        <div class="scope-warn-tip">
+          勾上覆盖它们的仓库后这些目录才能被修改<template v-if="reposInScopes.length">（当前范围涉及 {{ reposInScopes.length }} 个仓库）</template>。
+        </div>
+      </div>
+
+      <div v-if="selectedRepos.length && !canApply" class="apply-hint">
         当前执行器 <b>{{ provider }}</b> 只能分析；改代码请切到 <b>claude</b> 或 <b>dsh</b>（在 ① 里切换）。
       </div>
+
+      <!-- 修复上下文（给用户看、可编辑，也会喂给 agent） -->
+      <el-collapse v-model="contextOpen" class="flow-collapse ctx-collapse">
+        <el-collapse-item name="ctx">
+          <template #title>
+            <span class="flow-title">修复边界（上下文文件）</span>
+            <span class="ih-muted flow-hint">AI 按这里的说明改代码 · 可编辑</span>
+          </template>
+          <div class="ctx-body">
+            <div class="ctx-toolbar">
+              <span class="ih-muted ctx-path">{{ contextPath }}</span>
+              <el-button size="small" round :loading="contextLoading" @click="regenerateContext">
+                按当前范围重新生成
+              </el-button>
+              <el-button size="small" round type="primary" :loading="contextSaving" @click="saveContext">
+                保存
+              </el-button>
+            </div>
+            <el-input
+              v-model="contextDraft" type="textarea" :rows="16" class="ctx-input"
+              placeholder="这里会显示本次修复的边界说明：哪些仓库能改、哪些不能碰、有哪些约束。可以自己改。"
+            />
+            <div class="ih-muted ctx-hint">
+              「自动生成区」会被重新生成覆盖；「你维护区」里的内容永远保留。
+            </div>
+          </div>
+        </el-collapse-item>
+      </el-collapse>
+
+      <!-- 分析流程图（默认折叠，有 flow 才显示） -->
+      <el-collapse v-if="fixFlow" v-model="flowOpen" class="flow-collapse">
+        <el-collapse-item name="flow">
+          <template #title>
+            <span class="flow-title">分析流程图</span>
+            <span class="ih-muted flow-hint">故障链路 · 点开查看</span>
+          </template>          <MermaidView v-if="flowOpen.includes('flow')" :code="fixFlow" :dark="isDark" />
+        </el-collapse-item>
+      </el-collapse>
 
       <!-- 分析结果 -->
       <div v-if="fixPlan" class="fix-plan">
@@ -273,39 +337,71 @@
       </div>
       <div v-else-if="!fixState" class="ih-muted fix-empty">还没有分析结果，点「生成修复方案」。</div>
 
-      <!-- worktree 结果 -->
-      <div v-if="fixState" class="worktree">
+      <!-- worktree 结果：按仓库分组，各自独立采纳/驳回 -->
+      <div v-if="repoStateList.length" class="worktree">
         <div class="wt-head">
           <div class="wt-meta">
             <span class="wt-tag">worktree</span>
-            <code>{{ fixState.branch }}</code>
-            <span class="ih-muted">{{ fixState.worktree }}</span>
+            <span class="ih-muted">{{ repoStateList.length }} 个仓库</span>
           </div>
           <div class="wt-actions">
             <el-button size="small" round @click="refreshDiff">刷新 diff</el-button>
             <el-button
-              v-if="!fixState.accepted"
-              size="small" round type="success" :loading="accepting" :disabled="diffEmpty || !diffData"
-              @click="doAccept"
-            >采纳并合并</el-button>
+              v-if="hasAnyDiff && repoStateList.some((r) => !r.state.accepted && r.state.status !== 'failed')"
+              size="small" round type="success" :loading="accepting" @click="doAccept()"
+            >全部采纳</el-button>
             <el-button
-              v-if="!fixState.accepted"
-              size="small" round type="danger" plain :loading="rejecting" @click="doReject"
-            >驳回</el-button>
+              size="small" round type="danger" plain :loading="rejecting" @click="doReject()"
+            >全部驳回</el-button>
           </div>
         </div>
 
-        <div v-if="fixState.accepted" class="accepted-box">
-          <b>已采纳</b>
-          <span v-if="fixState.merge?.merged">已合并到 {{ fixState.merge.base_branch }}</span>
-          <span v-else>已提交到分支，需人工合并：<code>{{ fixState.merge?.command }}</code></span>
-        </div>
+        <div v-for="r in repoStateList" :key="r.path" class="repo-card">
+          <div class="repo-card-head">
+            <div class="repo-card-title">
+              <b>{{ r.name }}</b>
+              <span class="repo-card-status" :class="`is-${r.state.status || 'unknown'}`">
+                {{ r.state.status === 'failed' ? '失败' : r.state.status === 'unchanged' ? '无改动' : r.state.accepted ? '已采纳' : '待审阅' }}
+              </span>
+              <code class="repo-card-path">{{ r.path }}</code>
+            </div>
+            <div class="repo-card-actions">
+              <el-button
+                v-if="r.state.branch" size="small" round type="success"
+                :disabled="r.state.accepted || r.state.status === 'failed'"
+                :loading="accepting" @click="doAccept(r.path)"
+              >采纳</el-button>
+              <el-button
+                size="small" round type="danger" plain :loading="rejecting" @click="doReject(r.path)"
+              >驳回</el-button>
+            </div>
+          </div>
 
-        <div class="diff-stat">{{ diffData?.stat || fixState.diff_stat || '（暂无改动）' }}</div>
-        <pre v-if="diffData?.diff" class="diff-view"><code><span
-          v-for="(line, i) in diffLines" :key="i" :class="diffLineClass(line)"
-        >{{ line + '\n' }}</span></code></pre>
-        <div v-if="diffData?.truncated" class="ih-muted">diff 太长已截断，完整内容请到 worktree 查看。</div>
+          <div v-if="r.state.branch" class="repo-card-meta">
+            <code>{{ r.state.branch }}</code>
+            <span class="ih-muted">{{ r.state.worktree }}</span>
+          </div>
+
+          <div v-if="r.state.status === 'failed'" class="repo-error">
+            <b>修改失败</b>
+            <div>{{ r.state.error }}</div>
+          </div>
+
+          <div v-if="r.state.accepted" class="accepted-box">
+            <b>已采纳</b>
+            <span v-if="r.state.merge?.merged">已合并到 {{ r.state.merge.base_branch }}</span>
+            <span v-else>已提交到分支，需人工合并：<code>{{ r.state.merge?.command }}</code></span>
+          </div>
+
+          <template v-if="r.state.status !== 'failed'">
+            <div class="diff-stat">{{ diffs[r.path]?.stat || r.state.diff_stat || '（暂无改动）' }}</div>
+            <pre v-if="diffs[r.path]?.diff" class="diff-view"><code><span
+              v-for="(line, i) in (diffs[r.path].diff || '').split('\n')" :key="i" :class="diffLineClass(line)"
+            >{{ line + '\n' }}</span></code></pre>
+            <div v-if="diffs[r.path]?.truncated" class="ih-muted">diff 太长已截断，完整内容请到 worktree 查看。</div>
+            <div v-if="r.state.summary" class="repo-summary">{{ r.state.summary }}</div>
+          </template>
+        </div>
       </div>
     </section>
 
@@ -346,15 +442,19 @@
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import MermaidView from '../components/MermaidView.vue'
+import { useTheme } from '../useTheme'
 import {
   acceptFix, applyFix, confirmQualify, deleteAttachment, deleteIssue, fileUrl,
-  getCodeRoots, getFixDiff, getIssue, getSettings, patchIssue, rejectFix,
-  runFix, runQualify, runTriage, uploadAttachments, type CodeRoot
+  getCodeRoots, getFixContext, getFixDiff, getIssue, getSettings, patchIssue,
+  regenerateFixContext, rejectFix, runFix, runQualify, runTriage, saveFixContext,
+  uploadAttachments, type CodeRoot, type TargetRepo
 } from '../api'
 
 const route = useRoute()
 const router = useRouter()
 const id = computed(() => Number(route.params.id))
+const { isDark } = useTheme()
 
 const issue = ref<any>(null)
 const attachments = ref<any[]>([])
@@ -377,9 +477,10 @@ const fixing = ref(false)
 const roots = ref<CodeRoot[]>([])
 /** 分析用（可多选），存到 issue.code_scopes */
 const selectedScopes = ref<string[]>([])
-/** 改代码用（单个 git 仓库），存到 issue.target_repo */
-const targetRepo = ref('')
-const diffData = ref<{ stat: string; diff: string; files: string[]; truncated: boolean } | null>(null)
+/** 改代码用（可多个 git 仓库），存到 issue.target_repos；勾代码范围时自动带出 */
+const selectedRepos = ref<string[]>([])
+/** 每个仓库的 diff（key 是仓库路径） */
+const diffs = ref<Record<string, any>>({})
 const applying = ref(false)
 const accepting = ref(false)
 const rejecting = ref(false)
@@ -391,18 +492,148 @@ const q = reactive({
 
 const triage = computed(() => issue.value?.triage || null)
 const fixPlan = computed(() => issue.value?.fix_plan || null)
-const fixState = computed(() => issue.value?.fix_state || null)
-const gitRoots = computed(() => roots.value.filter((r) => r.isGit && r.exists))
-const canApply = computed(() => !!targetRepo.value && ['claude', 'dsh'].includes(provider.value))
-const diffEmpty = computed(() => !diffData.value || !diffData.value.files?.length)
-const diffLines = computed(() => (diffData.value?.diff || '').split('\n'))
 
-const diffLineClass = (line: string) => {
-  if (line.startsWith('+++') || line.startsWith('---')) return 'dl-meta'
-  if (line.startsWith('+')) return 'dl-add'
-  if (line.startsWith('-')) return 'dl-del'
-  if (line.startsWith('@@')) return 'dl-hunk'
-  return ''
+/* ===== 分析流程图 ===== */
+/** AI 分析产出的 Mermaid 源码；老数据没有这个字段时整块隐藏 */
+const fixFlow = computed<string>(() => {
+  const raw = fixPlan.value?.flow
+  return typeof raw === 'string' ? raw.trim() : ''
+})
+/** 折叠状态：默认收起，用户点开才渲染（mermaid 按需加载） */
+const flowOpen = ref<string[]>([])
+const fixState = computed(() => issue.value?.fix_state || null)
+/** 可做 worktree 的仓库根（后端已按 repoRoot 去重，含 covers 子目录信息） */
+const targetRepos = ref<TargetRepo[]>([])
+const canApply = computed(
+  () => selectedRepos.value.length > 0 && ['claude', 'dsh'].includes(provider.value)
+)
+
+/* ===== 代码范围 × 目标仓库 ===== */
+
+/** 统一成可比较的形式：反斜杠转正斜杠、去尾斜杠、小写（Windows 大小写不敏感） */
+const normPath = (p: string) => (p || '').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+
+/** 判断 child 是否在 parent 目录之下（含相等） */
+const isUnder = (child: string, parent: string) => {
+  const c = normPath(child)
+  const p = normPath(parent)
+  if (!c || !p) return false
+  return c === p || c.startsWith(p + '/')
+}
+
+/** 目标仓库覆盖的路径集合（仓库根 + 它覆盖的子目录） */
+const coveredBy = (repo: TargetRepo | undefined) => {
+  if (!repo) return [] as string[]
+  return [repo.path, ...(repo.covers || [])]
+}
+
+/** 代码范围里实际涉及到的仓库（勾范围时自动映射成目标仓库） */
+const reposInScopes = computed(() =>
+  targetRepos.value.filter((repo) =>
+    coveredBy(repo).some((c) => selectedScopes.value.some((s) => isUnder(s, c)))
+  )
+)
+
+/** 勾了代码范围、但不属于任何已选目标仓库的目录（改代码时会被静默忽略） */
+const outOfRepoScopes = computed(() => {
+  if (!selectedRepos.value.length) return [] as string[]
+  const covered = selectedRepos.value.flatMap((p) => {
+    const r = targetRepos.value.find((x) => normPath(x.path) === normPath(p))
+    return coveredBy(r)
+  })
+  if (!covered.length) return [] as string[]
+  return selectedScopes.value.filter((s) => !covered.some((c) => isUnder(s, c)))
+})
+
+/** 判断某个仓库是否已选中（路径分隔符/大小写不敏感） */
+const isRepoSelected = (path: string) =>
+  selectedRepos.value.some((p) => normPath(p) === normPath(path))
+
+/** 去重后的已选仓库（同一仓库可能因分隔符不同出现两次） */
+const uniqRepos = computed(() => {
+  const seen = new Set<string>()
+  return selectedRepos.value.filter((p) => {
+    const k = normPath(p)
+    if (seen.has(k)) return false
+    seen.add(k)
+    return true
+  })
+})
+
+/** 目标仓库的展示信息 */
+const repoInfo = (path: string) =>
+  targetRepos.value.find((r) => normPath(r.path) === normPath(path))
+
+/** 当前 fix_state 里的仓库状态（按仓库分组） */
+const repoStates = computed<Record<string, any>>(() => {
+  const s = fixState.value
+  if (!s) return {}
+  if (s.repos) return s.repos
+  // 兼容旧的单仓库扁平结构
+  if (s.repo) return { [s.repo]: { ...s } }
+  return {}
+})
+const repoStateList = computed(() =>
+  Object.entries(repoStates.value).map(([path, st]) => ({
+    path,
+    name: (st as any).name || repoInfo(path)?.name || path.split(/[\\/]/).pop(),
+    state: st as any,
+  }))
+)
+const hasAnyDiff = computed(() =>
+  repoStateList.value.some((r) => (r.state.files || []).length > 0)
+)
+
+/* ===== 修复上下文文件 ===== */
+const contextText = ref('')
+const contextPath = ref('')
+const contextOpen = ref(false)
+const contextDraft = ref('')
+const contextSaving = ref(false)
+const contextLoading = ref(false)
+
+const loadContext = async () => {
+  if (!id.value) return
+  contextLoading.value = true
+  try {
+    const r = await getFixContext(id.value)
+    contextText.value = r.text || ''
+    contextPath.value = r.path || ''
+    contextDraft.value = r.text || ''
+  } catch {
+    contextText.value = ''
+  } finally {
+    contextLoading.value = false
+  }
+}
+
+const saveContext = async () => {
+  contextSaving.value = true
+  try {
+    const r = await saveFixContext(id.value, contextDraft.value)
+    contextText.value = contextDraft.value
+    contextPath.value = r.path || contextPath.value
+    ElMessage.success('上下文已保存')
+  } catch {
+    ElMessage.error('保存失败')
+  } finally {
+    contextSaving.value = false
+  }
+}
+
+const regenerateContext = async () => {
+  contextLoading.value = true
+  try {
+    const r = await regenerateFixContext(id.value)
+    contextText.value = r.text
+    contextDraft.value = r.text
+    contextPath.value = r.path
+    ElMessage.success('已按当前范围重新生成（你手写的部分已保留）')
+  } catch {
+    ElMessage.error('重新生成失败')
+  } finally {
+    contextLoading.value = false
+  }
 }
 const imageUrls = computed(() =>
   attachments.value.filter((a) => (a.mime || '').startsWith('image/')).map((a) => fileUrl(a.path))
@@ -445,8 +676,17 @@ const load = async () => {
   events.value = res.events
   rawText.value = res.issue.raw_text || ''
   selectedScopes.value = Array.isArray(res.issue.code_scopes) ? res.issue.code_scopes : []
-  targetRepo.value = res.issue.target_repo || ''
+  const tr = res.issue.target_repos
+  selectedRepos.value = Array.isArray(tr) ? tr : (res.issue.target_repo ? [res.issue.target_repo] : [])
   fillQualifyForm(res.issue.qualify_final || res.issue.qualify_draft)
+  // 老数据没有目标仓库时，按已勾的范围自动补一次（只在首次进入时做）
+  if (!selectedRepos.value.length && selectedScopes.value.length && targetRepos.value.length) {
+    const mapped = reposInScopes.value.map((r) => r.path)
+    if (mapped.length) {
+      selectedRepos.value = mapped
+      patchIssue(id.value, { target_repos: mapped }).catch(() => {})
+    }
+  }
   if (res.issue.fix_state) await loadDiff()
 }
 
@@ -534,27 +774,53 @@ const doFix = async () => {
   }
 }
 
-/* ===== 代码范围 / worktree 操作 ===== */
+/* ===== 代码范围 / 目标仓库 / worktree 操作 ===== */
 
+/** 保存目标仓库列表到 issue.target_repos */
+const saveRepos = async () => {
+  await patchIssue(id.value, { target_repos: selectedRepos.value })
+}
+
+/** 勾选/取消代码范围；同时按范围自动维护目标仓库 */
 const toggleScope = async (path: string) => {
   const next = selectedScopes.value.includes(path)
     ? selectedScopes.value.filter((p) => p !== path)
     : [...selectedScopes.value, path]
   selectedScopes.value = next
   await patchIssue(id.value, { code_scopes: next })
+  await autoMapRepos()
 }
 
-const saveRepo = async () => {
-  await patchIssue(id.value, { target_repo: targetRepo.value || '' })
+/**
+ * 代码范围 → 目标仓库的自动映射。
+ *
+ * 规则：勾上的范围所涉及的仓库自动加进目标仓库；取消范围时，
+ * 如果某个仓库已经不被任何范围覆盖，就从目标仓库里移除。
+ * 用户手动勾的仓库只要还在范围覆盖内就保留。
+ */
+const autoMapRepos = async () => {
+  const should = reposInScopes.value.map((r) => r.path)
+  const next = Array.from(new Set([...selectedRepos.value, ...should]))
+    .filter((p) => should.some((s) => normPath(s) === normPath(p)))
+  if (JSON.stringify(next.slice().sort()) === JSON.stringify(selectedRepos.value.slice().sort())) return
+  selectedRepos.value = next
+  await saveRepos()
+}
+
+const toggleRepo = async (path: string) => {
+  selectedRepos.value = isRepoSelected(path)
+    ? selectedRepos.value.filter((p) => normPath(p) !== normPath(path))
+    : [...selectedRepos.value, path]
+  await saveRepos()
 }
 
 const loadDiff = async () => {
-  if (!fixState.value) return
+  if (!Object.keys(repoStates.value).length) return
   try {
     const res = await getFixDiff(id.value)
-    diffData.value = res.diff
+    diffs.value = res.diffs || {}
   } catch {
-    diffData.value = null
+    diffs.value = {}
   }
 }
 
@@ -564,13 +830,27 @@ const refreshDiff = async () => {
 }
 
 const doApply = async () => {
+  if (!selectedRepos.value.length) {
+    ElMessage.warning('先选择至少一个目标仓库')
+    return
+  }
   applying.value = true
   try {
-    const res = await applyFix(id.value, { provider: provider.value, repo: targetRepo.value })
+    const res = await applyFix(id.value, { provider: provider.value, repos: selectedRepos.value })
     await load()
-    diffData.value = res.diff
-    if (res.diff?.empty) ElMessage.warning('AI 没有产生任何文件改动，看下它的说明')
-    else ElMessage.success(`已修改 ${res.diff.files.length} 个文件，请审阅 diff`)
+    diffs.value = res.diffs || {}
+    const states = Object.values(res.state?.repos || {}) as any[]
+    const failed = states.filter((s) => s.status === 'failed')
+    const changed = states.filter((s) => s.status === 'changed')
+    if (failed.length && !changed.length) {
+      ElMessage.error(`${failed.length} 个仓库修改失败，看下错误详情`)
+    } else if (failed.length) {
+      ElMessage.warning(`${changed.length} 个仓库有改动，${failed.length} 个失败`)
+    } else if (!changed.length) {
+      ElMessage.warning('AI 没有产生任何文件改动，看下它的说明')
+    } else {
+      ElMessage.success(`${changed.length} 个仓库有改动，请审阅 diff`)
+    }
   } catch (e: any) {
     ElMessage.error(e?.response?.data?.detail || '修改失败')
   } finally {
@@ -578,16 +858,23 @@ const doApply = async () => {
   }
 }
 
-const doAccept = async () => {
+/** 采纳：传 repo 只采纳一个，不传采纳全部 */
+const doAccept = async (repo?: string) => {
+  const label = repo ? repoInfo(repo)?.name || repo : '全部仓库'
   await ElMessageBox.confirm(
-    '将提交 worktree 里的改动，并在主仓库干净时自动合并。继续？', '采纳', { type: 'warning' })
+    `将提交 ${label} 的改动，并在主仓库干净时自动合并。继续？`, '采纳', { type: 'warning' })
   accepting.value = true
   try {
-    const res = await acceptFix(id.value, {})
+    const res = await acceptFix(id.value, repo ? { repo } : {})
     await load()
     await loadDiff()
-    if (res.merge?.merged) ElMessage.success(`已合并到 ${res.merge.base_branch}`)
-    else ElMessage.warning(res.merge?.reason || '已提交到分支，需人工合并')
+    const results = Object.entries(res.results || {})
+    const merged = results.filter(([, r]: any) => r?.merge?.merged).length
+    const notMerged = results.filter(([, r]: any) => r?.ok && !r?.merge?.merged)
+    const bad = results.filter(([, r]: any) => !r?.ok)
+    if (bad.length) ElMessage.error(`${bad.length} 个仓库采纳失败：${(bad[0][1] as any).error || ''}`)
+    else if (notMerged.length) ElMessage.warning('已提交到分支，需人工合并')
+    else ElMessage.success(`已合并 ${merged} 个仓库`)
   } catch (e: any) {
     ElMessage.error(e?.response?.data?.detail || '采纳失败')
   } finally {
@@ -595,13 +882,16 @@ const doAccept = async () => {
   }
 }
 
-const doReject = async () => {
-  await ElMessageBox.confirm('丢弃 worktree 和分支？改动会全部删除。', '驳回', { type: 'warning' })
+/** 驳回：传 repo 只丢一个，不传全丢 */
+const doReject = async (repo?: string) => {
+  const label = repo ? repoInfo(repo)?.name || repo : '全部仓库'
+  await ElMessageBox.confirm(`丢弃 ${label} 的 worktree 和分支？改动会全部删除。`, '驳回', { type: 'warning' })
   rejecting.value = true
   try {
-    await rejectFix(id.value)
+    await rejectFix(id.value, repo ? { repo } : {})
     await load()
-    diffData.value = null
+    if (repo) delete diffs.value[repo]
+    else diffs.value = {}
     ElMessage.success('已丢弃')
   } catch (e: any) {
     ElMessage.error(e?.response?.data?.detail || '驳回失败')
@@ -650,8 +940,12 @@ onMounted(async () => {
     getCodeRoots().catch(() => null)
   ])
   if (s) providers.value = s.providers
-  if (r) roots.value = r.roots
+  if (r) {
+    roots.value = r.roots
+    targetRepos.value = r.targetRepos || []
+  }
   await load()
+  await loadContext()
 })
 </script>
 
@@ -774,6 +1068,35 @@ onMounted(async () => {
   color: var(--el-color-primary); font-weight: 600;
 }
 .scope-chip.is-missing { opacity: 0.55; }
+
+/* ---------- 分析流程图（折叠） ---------- */
+.flow-collapse {
+  margin: 4px 0 18px;
+  border: 1px solid var(--ih-line);
+  border-radius: 12px;
+  background: var(--ih-soft);
+  overflow: hidden;
+}
+.flow-collapse :deep(.el-collapse-item__header) {
+  padding: 0 16px;
+  height: 46px;
+  background: transparent;
+  border-bottom: none;
+  gap: 10px;
+}
+/* 标题与说明之间留出间隔，避免贴在一起 */
+.flow-collapse :deep(.el-collapse-item__title) {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+.flow-collapse :deep(.el-collapse-item__wrap) {
+  background: var(--ih-card);
+  border-top: 1px solid var(--ih-line);
+}
+.flow-collapse :deep(.el-collapse-item__content) { padding: 16px; }
+.flow-title { font-weight: 600; font-size: 13.5px; }
+.flow-hint { font-size: 12px; }
 .scope-badge {
   font-size: 10px; padding: 0 5px; border-radius: 6px;
   background: var(--ih-soft-2); color: var(--ih-sub);
@@ -787,6 +1110,77 @@ onMounted(async () => {
   padding: 8px 12px; border-radius: 10px; font-size: 12px; line-height: 1.6;
   background: var(--ih-warn-soft); color: var(--ih-warn-ink); margin-bottom: 12px;
 }
+
+/* ---------- 目标仓库下拉 + 一致性提示 ---------- */
+.infer-btn { margin-left: auto; padding: 0; height: auto; font-size: 12px; }
+.repo-opt { display: flex; align-items: baseline; gap: 8px; }
+.repo-opt-name { font-weight: 600; }
+.repo-opt-path { color: var(--ih-sub); font-size: 11.5px; }
+.repo-opt-covers { color: var(--ih-sub); font-size: 11px; margin-top: 1px; }
+
+.repo-detail { margin-top: 8px; display: flex; flex-direction: column; gap: 4px; }
+.repo-detail-row code {
+  font-size: 11.5px; color: var(--ih-sub);
+  background: var(--ih-soft); border: 1px solid var(--ih-line);
+  border-radius: 6px; padding: 2px 8px; display: inline-block;
+  word-break: break-all;
+}
+
+/* ---------- 上下文文件 ---------- */
+.ctx-collapse { margin-bottom: 14px; }
+.ctx-body { display: flex; flex-direction: column; gap: 10px; }
+.ctx-toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.ctx-path { font-size: 11.5px; flex: 1; min-width: 180px; word-break: break-all; }
+.ctx-input :deep(textarea) {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px; line-height: 1.65;
+}
+.ctx-hint { font-size: 11.5px; }
+
+/* ---------- 按仓库分组的 worktree ---------- */
+.repo-card {
+  border: 1px solid var(--ih-line); border-radius: 12px;
+  padding: 14px 16px; margin-bottom: 12px; background: var(--ih-soft);
+}
+.repo-card-head {
+  display: flex; justify-content: space-between; align-items: center;
+  gap: 10px; flex-wrap: wrap; margin-bottom: 6px;
+}
+.repo-card-title { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
+.repo-card-path { font-size: 11px; color: var(--ih-sub); word-break: break-all; }
+.repo-card-status {
+  font-size: 11px; padding: 1px 8px; border-radius: 999px;
+  background: var(--ih-soft-2); color: var(--ih-sub);
+}
+.repo-card-status.is-changed { background: var(--ih-success-soft); color: var(--ih-success-ink); }
+.repo-card-status.is-failed { background: var(--ih-warn-soft); color: var(--ih-warn-ink); }
+.repo-card-meta { display: flex; gap: 8px; align-items: center; font-size: 11.5px; flex-wrap: wrap; margin-bottom: 8px; }
+.repo-card-meta code { font-size: 11.5px; }
+.repo-card-actions { display: flex; gap: 6px; flex-shrink: 0; }
+.repo-error {
+  background: var(--ih-warn-soft); color: var(--ih-warn-ink);
+  border-radius: 8px; padding: 10px 12px; font-size: 12.5px; line-height: 1.6;
+  margin-bottom: 8px; word-break: break-word;
+}
+.repo-error b { display: block; margin-bottom: 4px; }
+.repo-summary {
+  margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--ih-line);
+  font-size: 12.5px; color: var(--ih-sub); white-space: pre-wrap; line-height: 1.65;
+}
+
+.scope-warn {
+  padding: 12px 14px; border-radius: 10px; margin-bottom: 12px;
+  background: var(--ih-warn-soft); color: var(--ih-warn-ink);
+  font-size: 12.5px; line-height: 1.65;
+  border-left: 3px solid var(--el-color-warning);
+}
+.scope-warn b { display: block; margin-bottom: 4px; }
+.scope-warn-body code {
+  display: inline-block; margin: 2px 6px 2px 0; padding: 1px 7px;
+  border-radius: 5px; background: var(--ih-card); border: 1px solid var(--ih-line);
+  font-size: 11.5px; word-break: break-all;
+}
+.scope-warn-tip { margin-top: 6px; opacity: 0.9; }
 
 .worktree { margin-top: 14px; border-top: 1px dashed var(--ih-line); padding-top: 14px; }
 .wt-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }

@@ -320,76 +320,143 @@ def list_code_roots() -> dict:
     return {"roots": _roots(), "ignore": ignore_list(), "projectNotes": project_notes()}
 
 
+def _norm_state(row: dict) -> dict:
+    """把 fix_state 归一化成 {repos: {path: {...}}}（兼容旧的单仓库结构）。"""
+    state = _parse(row.get("fix_state")) or {}
+    if not isinstance(state, dict):
+        return {"repos": {}}
+    if "repos" in state:
+        return state
+    if state.get("repo"):
+        repo = state["repo"]
+        inner = {k: v for k, v in state.items() if k != "repo"}
+        return {"repos": {repo: {"repo": repo, **inner}}, "context": ""}
+    return {"repos": {}}
+
+
 @mcp.tool()
 def get_fix_diff(issue_id: int) -> dict:
-    """查看某个 issue 的 worktree 当前 diff（人工改过也会体现）。"""
+    """查看某个 issue 各仓库 worktree 的当前 diff（人工改过也会体现）。"""
     from app.fix import FixError, collect_diff
     row = _issue(issue_id)
     if not row:
         return {"error": f"问题 #{issue_id} 不存在"}
-    state = _parse(row.get("fix_state"))
-    if not state:
+    state = _norm_state(row)
+    if not state.get("repos"):
         return {"error": "还没有开始修改（fix_state 为空）"}
-    try:
-        return {"state": state, "diff": collect_diff(state["worktree"])}
-    except FixError as ex:
-        return {"error": str(ex)}
+    diffs = {}
+    for repo, st in state["repos"].items():
+        wt = st.get("worktree")
+        if not wt:
+            diffs[repo] = {"error": st.get("error") or "没有 worktree"}
+            continue
+        try:
+            diffs[repo] = collect_diff(wt)
+        except FixError as ex:
+            diffs[repo] = {"error": str(ex)}
+    return {"state": state, "diffs": diffs}
 
 
 @mcp.tool()
-def accept_fix(issue_id: int, message: str = "", merge: bool = True) -> dict:
-    """采纳 worktree 改动：提交到分支，主仓库干净时 ff 合并。"""
+def accept_fix(issue_id: int, repo: str = "", message: str = "", merge: bool = True) -> dict:
+    """采纳 worktree 改动：提交到分支，主仓库干净时 ff 合并。
+
+    多仓库时按仓库独立采纳；repo 传空表示采纳全部已成功的仓库。
+    """
     from app.fix import FixError, commit_all, merge_to_base
     row = _issue(issue_id)
     if not row:
         return {"error": f"问题 #{issue_id} 不存在"}
-    state = _parse(row.get("fix_state"))
-    if not state:
+    state = _norm_state(row)
+    repos = state.get("repos") or {}
+    if not repos:
         return {"error": "还没有开始修改"}
-    if state.get("accepted"):
-        return {"ok": True, "already": True}
-    msg = message.strip() or f"fix(issue-{issue_id}): {row['title']}"
-    try:
-        if not commit_all(state["worktree"], msg):
-            return {"error": "worktree 里没有改动"}
-    except FixError as ex:
-        return {"error": str(ex)}
-    result = {"merged": False, "reason": "未请求合并"}
-    if merge:
+
+    targets = [repo] if repo else list(repos.keys())
+    results = {}
+    for r in targets:
+        st = repos.get(r)
+        if not st:
+            results[r] = {"ok": False, "error": "不在本次修改范围内"}
+            continue
+        if st.get("accepted"):
+            results[r] = {"ok": True, "already": True}
+            continue
+        if st.get("status") == "failed" or not st.get("worktree"):
+            results[r] = {"ok": False, "error": st.get("error") or "没有可采纳的改动"}
+            continue
+        msg = message.strip() or f"fix(issue-{issue_id}): {row['title']}"
         try:
-            result = merge_to_base(state["repo"], state["branch"])
+            if not commit_all(st["worktree"], msg):
+                results[r] = {"ok": False, "error": "worktree 里没有改动"}
+                continue
         except FixError as ex:
-            result = {"merged": False, "reason": str(ex),
-                      "command": f"git -C {state['repo']} merge {state['branch']}"}
-    state.update({"accepted": True, "accepted_at": now(), "commit_message": msg, "merge": result})
+            results[r] = {"ok": False, "error": str(ex)}
+            continue
+        merge_result = {"merged": False, "reason": "未请求合并"}
+        if merge:
+            try:
+                merge_result = merge_to_base(st["repo"], st["branch"])
+            except FixError as ex:
+                merge_result = {"merged": False, "reason": str(ex),
+                                "command": f"git -C {st['repo']} merge {st['branch']}"}
+        st.update({"accepted": True, "accepted_at": now(),
+                   "commit_message": msg, "merge": merge_result})
+        results[r] = {"ok": True, "merge": merge_result}
+
     with connect() as conn:
         conn.execute("UPDATE issue SET fix_state = ?, status = '待验收', updated_at = ? WHERE id = ?",
                      (json.dumps(state, ensure_ascii=False), now(), issue_id))
         add_event(conn, issue_id, "fix_accept", from_status=row["status"], to_status="待验收",
                   note="MCP 采纳")
-    return {"ok": True, "merge": result}
+    return {"ok": True, "results": results}
 
 
 @mcp.tool()
-def reject_fix(issue_id: int) -> dict:
-    """丢弃 worktree 和分支，状态回到「待处理」。"""
-    from app.fix import drop_worktree
+def reject_fix(issue_id: int, repo: str = "") -> dict:
+    """丢弃 worktree 和分支。repo 传空表示全部丢弃。"""
+    from app.fix import drop_all_worktrees
     row = _issue(issue_id)
     if not row:
         return {"error": f"问题 #{issue_id} 不存在"}
-    state = _parse(row.get("fix_state"))
-    if not state:
+    state = _norm_state(row)
+    repos = state.get("repos") or {}
+    if not repos:
         return {"ok": True}
-    try:
-        drop_worktree(state["repo"], issue_id)
-    except Exception:
-        pass
+    targets = [repo] if repo else list(repos.keys())
+    if repo and repo not in repos:
+        return {"error": f"{repo} 不在本次修改范围内"}
+    drop_all_worktrees(issue_id, targets)
+    for r in targets:
+        repos.pop(r, None)
+
     with connect() as conn:
-        conn.execute("UPDATE issue SET fix_state = NULL, status = '待处理', updated_at = ? WHERE id = ?",
-                     (now(), issue_id))
-        add_event(conn, issue_id, "fix_reject", from_status=row["status"], to_status="待处理",
-                  note="MCP 驳回")
-    return {"ok": True}
+        if repos:
+            state["repos"] = repos
+            conn.execute("UPDATE issue SET fix_state = ?, updated_at = ? WHERE id = ?",
+                         (json.dumps(state, ensure_ascii=False), now(), issue_id))
+        else:
+            conn.execute("UPDATE issue SET fix_state = NULL, status = '待处理', updated_at = ? WHERE id = ?",
+                         (now(), issue_id))
+        add_event(conn, issue_id, "fix_reject",
+                  note=f"MCP 驳回：{repo or '全部'}")
+    return {"ok": True, "repos": list(repos.keys())}
+
+
+@mcp.tool()
+def get_fix_context(issue_id: int) -> dict:
+    """读取该 issue 的「修复边界」上下文文件（用户可编辑，会喂给改代码的 agent）。"""
+    from app import context as ctx
+    row = _issue(issue_id)
+    if not row:
+        return {"error": f"问题 #{issue_id} 不存在"}
+    text = ctx.read(issue_id)
+    if not text:
+        scopes = _parse(row.get("code_scopes")) or []
+        repos = _parse(row.get("target_repos")) or ([row["target_repo"]] if row.get("target_repo") else [])
+        text = ctx.ensure(issue_id, row, [{"path": r, "name": r.split("\\")[-1].split("/")[-1]} for r in repos],
+                          scopes, get_settings().get("code.project_notes") or "")
+    return {"text": text, "path": str(ctx.context_path(issue_id))}
 
 
 if __name__ == "__main__":

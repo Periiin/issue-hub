@@ -102,7 +102,17 @@ FIX_TEMPLATE = """针对下面这条问题，请在代码仓库中定位相关�
 1. 先定位问题根因（能定位到文件/函数就写出来）。
 2. 给出修复方案和改动点（文件路径 + 改什么）。
 3. 评估风险与回归点。
-4. **这一轮只做分析，不要修改任何文件。**
+4. 画一张故障链路流程图（Mermaid flowchart），让人一眼看出问题出在哪一步。
+5. **这一轮只做分析，不要修改任何文件。**
+
+【流程图规则】flow 字段必须是可直接渲染的 Mermaid flowchart 源码：
+- 第一行固定 `flowchart TD`，节点从上到下排。
+- **所有节点标签和连线标签必须用双引号包起来**，例如 `A["前端请求 /app/user/login"]`、
+  `B{"token 有效?"}`、`C -->|"校验失败"| D["返回 401"]`。
+  路径里的 `/`、`@`、`:` 等字符不加引号会导致 Mermaid 解析失败。
+- 只画关键步骤（5~12 个节点），不要把所有代码细节都塞进去。
+- 用 `style` 标出问题节点，例如 `style D fill:#ffe0e0,stroke:#d33`。
+- 不要输出 Markdown 代码块标记，不要有 ```mermaid 包裹。
 
 严格输出 JSON：
 {{
@@ -111,6 +121,7 @@ FIX_TEMPLATE = """针对下面这条问题，请在代码仓库中定位相关�
   "changes": ["具体改动点，每条一句话"],
   "verification": ["怎么验证修好了"],
   "risks": ["风险/回归点"],
+  "flow": "flowchart TD\n  A[\"起点\"] --> B{{\"判断\"}}\n  B -->|\"失败\"| C[\"出问题的一步\"]\n  style C fill:#ffe0e0,stroke:#d33",
   "can_auto_fix": true
 }}
 """
@@ -123,6 +134,9 @@ APPLY_SYSTEM = (
 APPLY_TEMPLATE = """在下面这个独立的工作目录里修复问题（这是一个 git worktree，可以放心修改）：
 
 工作目录：{worktree}
+
+【本次修复边界】（由 issue-hub 生成，用户可能已修改，请严格遵守）
+{boundary}
 
 【问题描述】
 {description}
@@ -137,6 +151,7 @@ APPLY_TEMPLATE = """在下面这个独立的工作目录里修复问题（这是
 4. 不要编写或修改测试来"绕过"问题；如果仓库已有相关测试，可以补一条最直接的回归用例。
 5. 改完如果有把握，跑一次最小编译/类型检查（如 `mvn -q -pl <module> compile`、`npx vue-tsc --noEmit`），把结果写进总结；跑不动就跳过，不要卡住。
 6. 如果判断不该改代码（比如是配置或数据问题），直接说明原因，不要硬改。
+7. 如果根因不在本 worktree 覆盖的目录内，**不要硬改**，在总结里说明「需要在 xxx 仓库修复」。
 
 【输出】
 用中文给出：
@@ -179,11 +194,24 @@ def build_fix_prompt(qualify_final: dict[str, Any], scopes: list[str] | None = N
 
 
 def build_apply_prompt(qualify_final: dict[str, Any], worktree: str,
-                       plan: dict[str, Any] | None = None) -> str:
+                       plan: dict[str, Any] | None = None,
+                       boundary: str = "", context_file: str = "") -> str:
+    """boundary 是「修复边界」正文（来自 context 文件），会内联进提示词。
+
+    agent 不一定愿意去 read 一个外部文件，内联最可靠；同时给出文件路径，
+    方便它想看完整版时自己打开。
+    """
+    if boundary:
+        boundary_block = boundary.strip()
+        if context_file:
+            boundary_block += f"\n\n（完整文件：{context_file}）"
+    else:
+        boundary_block = "（无额外边界说明，只改本 worktree 内的文件）"
     return APPLY_TEMPLATE.format(
         worktree=worktree,
         description=json.dumps(qualify_final, ensure_ascii=False, indent=2),
         plan=json.dumps(plan or {}, ensure_ascii=False, indent=2) if plan else "（无，自行判断）",
+        boundary=boundary_block,
     )
 
 

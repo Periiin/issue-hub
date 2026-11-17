@@ -23,8 +23,9 @@ CREATE TABLE IF NOT EXISTS issue (
     prompt_version  TEXT,
     fix_plan        TEXT,                        -- 「操作解决」生成的方案/差异说明
     code_scopes     TEXT,                        -- JSON 数组：分析用代码目录（可多选）
-    target_repo     TEXT,                        -- 单个 git 仓库：改代码用
-    fix_state       TEXT,                        -- JSON：worktree/branch/diff 等运行时状态
+    target_repo     TEXT,                        -- 旧字段：单个 git 仓库（保留兼容）
+    target_repos    TEXT,                        -- JSON 数组：改代码用的 git 仓库（可多个）
+    fix_state       TEXT,                        -- JSON：按仓库分组的 worktree/branch/diff 状态
     created_at      TEXT NOT NULL,
     updated_at      TEXT NOT NULL
 );
@@ -96,6 +97,7 @@ def init_db() -> None:
         for column, ddl in (
             ("code_scopes", "ALTER TABLE issue ADD COLUMN code_scopes TEXT"),
             ("target_repo", "ALTER TABLE issue ADD COLUMN target_repo TEXT"),
+            ("target_repos", "ALTER TABLE issue ADD COLUMN target_repos TEXT"),
             ("fix_state", "ALTER TABLE issue ADD COLUMN fix_state TEXT"),
         ):
             if column not in existing:

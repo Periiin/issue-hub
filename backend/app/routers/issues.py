@@ -86,8 +86,11 @@ def get_issue(issue_id: int):
         events = list_rows(conn.execute(
             "SELECT * FROM event WHERE issue_id = ? ORDER BY id DESC", (issue_id,)).fetchall())
     for key in ("qualify_draft", "qualify_final", "triage", "fix_plan",
-                "code_scopes", "fix_state"):
+                "code_scopes", "target_repos", "fix_state"):
         issue[key] = _json_or_none(issue.get(key))
+    # 兼容前端：target_repos 为空时回退到旧的单值字段
+    if not issue.get("target_repos") and issue.get("target_repo"):
+        issue["target_repos"] = [issue["target_repo"]]
     return {"issue": issue, "attachments": attachments, "runs": runs, "events": events}
 
 
@@ -98,10 +101,16 @@ def patch_issue(issue_id: int, payload: IssuePatch):
         raise HTTPException(400, f"非法状态：{data['status']}")
     if "code_scopes" in data:
         data["code_scopes"] = json.dumps(data["code_scopes"], ensure_ascii=False)
+    if "target_repos" in data:
+        data["target_repos"] = json.dumps(data["target_repos"], ensure_ascii=False)
     if "target_repo" in data and data["target_repo"]:
         from ..fix import is_repo_root
         if not is_repo_root(data["target_repo"]):
             raise HTTPException(400, "target_repo 必须是 git 仓库根目录")
+    # 兼容：只传了旧字段 target_repo 时，同步进 target_repos，保证新逻辑能读到
+    if "target_repo" in data and "target_repos" not in data:
+        data["target_repos"] = json.dumps(
+            [data["target_repo"]] if data["target_repo"] else [], ensure_ascii=False)
     if not data:
         return {"ok": True}
     data["updated_at"] = now()

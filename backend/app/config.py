@@ -8,6 +8,8 @@ BASE_DIR = Path(__file__).resolve().parents[2]
 DATA_DIR = Path(os.getenv("ISSUEHUB_DATA", str(BASE_DIR / "data")))
 DB_PATH = Path(os.getenv("ISSUEHUB_DB", str(DATA_DIR / "issuehub.db")))
 ATTACH_DIR = Path(os.getenv("ISSUEHUB_ATTACH", str(DATA_DIR / "attachments")))
+# 每个 issue 一份的「修复上下文」Markdown：给用户看、可编辑，也是喂给 agent 的边界说明
+CONTEXT_DIR = Path(os.getenv("ISSUEHUB_CONTEXT", str(DATA_DIR / "issue-context")))
 FRONTEND_DIST = BASE_DIR / "frontend" / "dist"
 
 # 允许的附件类型（截图为主，顺带支持 PDF）
