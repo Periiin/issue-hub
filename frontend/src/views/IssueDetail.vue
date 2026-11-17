@@ -80,15 +80,19 @@
 
     <!-- ① AI 定性 -->
     <section class="panel ih-card">
-      <div class="panel-head">
+      <div class="panel-head is-toggle" @click="toggleSection('qualify')">
         <div class="panel-title">
           <span class="step-badge">1</span>
           <div>
             <h2>AI 定性</h2>
-            <p>把口语化成结构化描述，人工确认后才进入定级</p>
+            <p v-if="sections.qualify">把口语化成结构化描述，人工确认后才进入定级</p>
+            <p v-else class="fold-summary">
+              <span class="fold-dot" :class="issue.qualify_final ? 'is-done' : 'is-todo'" />
+              {{ issue.qualify_final ? '已确认定性' : '尚未确认' }}
+            </p>
           </div>
         </div>
-        <div class="panel-actions">
+        <div class="panel-actions" @click.stop>
           <el-select v-model="provider" size="default" class="provider-select">
             <el-option v-for="p in providers" :key="p" :label="p" :value="p" />
           </el-select>
@@ -96,8 +100,10 @@
             {{ issue.qualify_final ? '重新定性' : 'AI 定性' }}
           </el-button>
         </div>
+        <span class="fold-arrow" :class="{ 'is-open': sections.qualify }" />
       </div>
 
+      <div v-show="sections.qualify" class="fold-body">
       <div class="state-chip" :class="issue.qualify_final ? 'is-done' : 'is-todo'">
         <span>{{ issue.qualify_final ? '已确认定性' : '尚未确认' }}</span>
         <span class="ih-muted" v-if="issue.qualify_final">{{ issue.updated_at }}</span>
@@ -137,23 +143,30 @@
       <div class="panel-foot">
         <el-button type="success" round :loading="confirming" @click="doConfirm">确认定性，进入定级</el-button>
       </div>
+      </div>
     </section>
 
     <!-- ② AI 定级 -->
     <section class="panel ih-card">
-      <div class="panel-head">
+      <div class="panel-head is-toggle" @click="toggleSection('triage')">
         <div class="panel-title">
           <span class="step-badge">2</span>
           <div>
             <h2>AI 定级</h2>
-            <p>影响等级、修复复杂度、优先级，可手动修正</p>
+            <p v-if="sections.triage">影响等级、修复复杂度、优先级，可手动修正</p>
+            <p v-else class="fold-summary">
+              <span :class="priorityClass(issue.priority)">{{ issue.priority || '未定级' }}</span>
+              <span class="ih-muted">{{ [issue.severity, issue.complexity].filter(Boolean).join(' · ') || '待定级' }}</span>
+            </p>
           </div>
         </div>
-        <div class="panel-actions">
+        <div class="panel-actions" @click.stop>
           <el-button type="primary" round :loading="triaging" @click="doTriage">生成定级</el-button>
         </div>
+        <span class="fold-arrow" :class="{ 'is-open': sections.triage }" />
       </div>
 
+      <div v-show="sections.triage" class="fold-body">
       <div class="triage-grid">
         <div class="triage-cell">
           <span class="triage-label">影响等级</span>
@@ -190,27 +203,35 @@
         </div>
       </div>
       <el-empty v-else description="确认定性后点「生成定级」" :image-size="70" />
+      </div>
     </section>
 
     <!-- ③ 操作解决 -->
     <section class="panel ih-card">
-      <div class="panel-head">
+      <div class="panel-head is-toggle" @click="toggleSection('fix')">
         <div class="panel-title">
           <span class="step-badge">3</span>
           <div>
             <h2>操作解决</h2>
-            <p>分析可跨目录；改代码在独立 worktree 里进行，人工采纳才合并</p>
+            <p v-if="sections.fix">分析可跨目录；改代码在独立 worktree 里进行，人工采纳才合并</p>
+            <p v-else class="fold-summary">
+              <span v-if="selectedRepos.length" class="ih-muted">目标仓库 {{ selectedRepos.length }} 个</span>
+              <span>{{ fixFoldSummary }}</span>
+            </p>
           </div>
         </div>
-        <div class="panel-actions">
+        <div class="panel-actions" @click.stop>
           <el-button type="warning" round :loading="fixing" @click="doFix">生成修复方案</el-button>
           <el-button
-            v-if="targetRepo"
+            v-if="selectedRepos.length"
             type="primary" round :loading="applying" :disabled="!canApply"
             @click="doApply"
           >开始修改</el-button>
         </div>
+        <span class="fold-arrow" :class="{ 'is-open': sections.fix }" />
       </div>
+
+      <div v-show="sections.fix" class="fold-body">
 
       <!-- 代码范围（分析用，多选） -->
       <div class="field-block">
@@ -403,6 +424,7 @@
           </template>
         </div>
       </div>
+      </div>
     </section>
 
     <!-- 时间线 -->
@@ -502,6 +524,45 @@ const fixFlow = computed<string>(() => {
 /** 折叠状态：默认收起，用户点开才渲染（mermaid 按需加载） */
 const flowOpen = ref<string[]>([])
 const fixState = computed(() => issue.value?.fix_state || null)
+
+/* ===== 三段面板的折叠 ===== */
+const sections = reactive({ qualify: true, triage: true, fix: true })
+/** 只在进入某个 issue 时按状态设置一次默认展开；之后用户手动切换不被覆盖 */
+let defaultedIssue = 0
+
+const toggleSection = (name: 'qualify' | 'triage' | 'fix') => {
+  sections[name] = !sections[name]
+}
+
+const applySectionDefaults = () => {
+  if (!issue.value || defaultedIssue === issue.value.id) return
+  defaultedIssue = issue.value.id
+  const st = issue.value.status || ''
+  if (st === '待定性') {
+    Object.assign(sections, { qualify: true, triage: false, fix: false })
+  } else if (st === '待定级') {
+    Object.assign(sections, { qualify: false, triage: true, fix: false })
+  } else if (['待处理', '处理中', '待验收'].includes(st)) {
+    Object.assign(sections, { qualify: false, triage: false, fix: true })
+  } else {
+    // 已解决 / 不修 / 无法复现：全部收起，页面只剩摘要
+    Object.assign(sections, { qualify: false, triage: false, fix: false })
+  }
+}
+
+/** 收起时标题旁的摘要：让用户不用展开也能看到关键结果 */
+const fixFoldSummary = computed(() => {
+  if (!repoStateList.value.length) return '未开始'
+  const changed = repoStateList.value.filter((r) => r.state.status === 'changed' && !r.state.accepted).length
+  const failed = repoStateList.value.filter((r) => r.state.status === 'failed').length
+  const accepted = repoStateList.value.filter((r) => r.state.accepted).length
+  const parts: string[] = []
+  if (changed) parts.push(`${changed} 待审阅`)
+  if (accepted) parts.push(`${accepted} 已采纳`)
+  if (failed) parts.push(`${failed} 失败`)
+  return parts.length ? parts.join(' · ') : '无改动'
+})
+
 /** 可做 worktree 的仓库根（后端已按 repoRoot 去重，含 covers 子目录信息） */
 const targetRepos = ref<TargetRepo[]>([])
 const canApply = computed(
@@ -679,6 +740,7 @@ const load = async () => {
   const tr = res.issue.target_repos
   selectedRepos.value = Array.isArray(tr) ? tr : (res.issue.target_repo ? [res.issue.target_repo] : [])
   fillQualifyForm(res.issue.qualify_final || res.issue.qualify_draft)
+  applySectionDefaults()
   // 老数据没有目标仓库时，按已勾的范围自动补一次（只在首次进入时做）
   if (!selectedRepos.value.length && selectedScopes.value.length && targetRepos.value.length) {
     const mapped = reposInScopes.value.map((r) => r.path)
@@ -979,6 +1041,30 @@ onMounted(async () => {
   display: flex; justify-content: space-between; align-items: flex-start;
   gap: 12px; flex-wrap: wrap; margin-bottom: 14px;
 }
+/* 可折叠面板：整条 head 可点；标题占满剩余空间，箭头贴最右 */
+.panel-head.is-toggle {
+  cursor: pointer; user-select: none;
+  justify-content: flex-start;
+  margin-bottom: 0;
+}
+.panel-head.is-toggle .panel-title { flex: 1 1 auto; min-width: 0; }
+.panel-head.is-toggle:hover h2 { color: var(--el-color-primary); }
+.fold-body { padding-top: 14px; }
+.fold-arrow {
+  flex: 0 0 auto; width: 9px; height: 9px; align-self: center;
+  border-right: 2px solid var(--ih-sub); border-bottom: 2px solid var(--ih-sub);
+  transform: rotate(-45deg); transition: transform 0.18s ease;
+}
+.fold-arrow.is-open { transform: rotate(45deg); }
+.fold-summary {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin: 3px 0 0; font-size: 12px; color: var(--ih-ink);
+}
+.fold-dot {
+  width: 7px; height: 7px; border-radius: 50%;
+}
+.fold-dot.is-done { background: #12b76a; }
+.fold-dot.is-todo { background: #f0a13c; }
 .panel-title { display: flex; gap: 12px; align-items: flex-start; }
 .panel-title h2 { margin: 0; font-size: 16px; font-weight: 700; }
 .panel-title p { margin: 3px 0 0; font-size: 12px; color: var(--ih-sub); }
