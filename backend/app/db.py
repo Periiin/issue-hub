@@ -111,6 +111,22 @@ CREATE TABLE IF NOT EXISTS channel (
     updated_at  TEXT NOT NULL
 );
 
+-- 对话记忆：挂在「问题 + 操作类型」上，与通道/模型无关。
+-- 设计意图：记忆属于问题，不属于某个 agent —— 换通道、隔几天再来，
+-- 任何模型都能读到之前讨论过什么，避免重复劳动和结论漂移。
+CREATE TABLE IF NOT EXISTS ai_session (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    issue_id    INTEGER NOT NULL,
+    kind        TEXT NOT NULL,          -- qualify / triage / analysis / apply
+    messages    TEXT,                   -- JSON：完整 messages 数组
+    rounds      INTEGER NOT NULL DEFAULT 0,   -- 累计工具轮数
+    turns       INTEGER NOT NULL DEFAULT 0,   -- 累计调用次数
+    tokens      INTEGER NOT NULL DEFAULT 0,   -- 估算 token
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uk_ai_session ON ai_session(issue_id, kind);
+
 CREATE TABLE IF NOT EXISTS event (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     issue_id    INTEGER NOT NULL,

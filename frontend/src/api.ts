@@ -250,3 +250,24 @@ export const testChannel = (id: number) =>
   api.post<{ ok: boolean; model: string; reply: string; durationMs: number }>(
     `/channels/${id}/test`, {}, { timeout: 180000 }
   ).then((r) => r.data)
+
+// ---------- 对话记忆 ----------
+
+export interface MemorySession {
+  id: number
+  kind: string
+  kindLabel: string
+  rounds: number
+  turns: number
+  tokens: number
+  created_at: string
+  updated_at: string
+}
+
+export const getMemory = (issueId: number) =>
+  api.get<{ sessions: MemorySession[]; kinds: Record<string, string> }>(`/issues/${issueId}/memory`)
+    .then((r) => r.data)
+
+/** kind 为空表示清空全部 */
+export const clearMemory = (issueId: number, kind = '') =>
+  api.delete(`/issues/${issueId}/memory`, { params: kind ? { kind } : {} }).then((r) => r.data)

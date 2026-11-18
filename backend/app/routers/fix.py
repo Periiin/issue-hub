@@ -19,6 +19,7 @@ from fastapi import APIRouter, HTTPException
 
 from .. import context as ctx
 from .. import projects
+from .. import memory as mem
 from ..db import add_event, connect, get_settings, now
 from ..fix import (FixError, collect_diff, commit_all, create_worktree, current_branch,
                    drop_all_worktrees, drop_worktree, ignore_list, is_repo_root,
@@ -244,7 +245,9 @@ def apply_fix(issue_id: int, payload: FixApplyReq):
         prompt = build_apply_prompt(confirmed, info["worktree"], plan,
                                    boundary=boundary, context_file=ctx_file)
         try:
+            block = mem.build_memory_block(issue, list_attempts(issue_id), current_kind="apply")
             result = run_ai(payload.channel_id, prompt, APPLY_SYSTEM, cwd=info["worktree"],
+                            issue_id=issue_id, kind="apply", memory_block=block,
                             timeout=timeout, allow_write=True)
         except AIError as ex:
             # 单个仓库失败不影响其它仓库，也不立刻删 worktree（便于人工排查）

@@ -101,6 +101,28 @@ def get_issue(issue_id: int):
             "events": events, "attempts": list_attempts(issue_id)}
 
 
+@router.get("/{issue_id}/memory")
+def get_memory(issue_id: int):
+    """查看这个问题的对话记忆：每类操作各一份，与通道无关。"""
+    from .. import memory as mem
+    with connect() as conn:
+        _load_issue(conn, issue_id)
+    sessions = mem.list_sessions(issue_id)
+    for s in sessions:
+        s["kindLabel"] = mem.KIND_LABELS.get(s["kind"], s["kind"])
+    return {"sessions": sessions, "kinds": mem.KIND_LABELS}
+
+
+@router.delete("/{issue_id}/memory")
+def clear_memory(issue_id: int, kind: str = ""):
+    """清空记忆。kind 为空清全部；否则只清某一类（如只清「改代码」的）。"""
+    from .. import memory as mem
+    with connect() as conn:
+        _load_issue(conn, issue_id)
+    n = mem.clear_session(issue_id, kind or None)
+    return {"ok": True, "cleared": n}
+
+
 @router.patch("/{issue_id}")
 def patch_issue(issue_id: int, payload: IssuePatch):
     data = payload.model_dump(exclude_none=True)

@@ -114,6 +114,30 @@
             <span class="ih-muted ctx-tip">点开可编辑；「你维护区」的内容重新生成时保留</span>
           </div>
         </div>
+
+        <!-- 对话记忆：挂在问题上，换通道也不丢 -->
+        <div class="field-block">
+          <div class="field-head">
+            <span class="field-title">对话记忆</span>
+            <span class="ih-muted">挂在问题上，换通道/换模型都不丢</span>
+            <el-button
+              v-if="memorySessions.length" link type="danger" class="field-head-btn"
+              @click="doClearMemory()"
+            >全部清空</el-button>
+          </div>
+          <div v-if="memorySessions.length" class="mem-list">
+            <div v-for="m in memorySessions" :key="m.id" class="mem-row">
+              <span class="mem-kind">{{ m.kindLabel }}</span>
+              <span class="mem-stat">{{ m.turns }} 次调用 · {{ m.rounds }} 轮工具</span>
+              <span class="mem-tokens">{{ m.tokens }} tok</span>
+              <span class="ih-muted mem-time">{{ (m.updated_at || '').slice(5, 16) }}</span>
+              <el-button link type="danger" size="small" @click="doClearMemory(m.kind)">清空</el-button>
+            </div>
+          </div>
+          <div v-else class="ih-muted mem-empty">
+            还没有对话记录。跑过一次定性/分析后，这里会显示累积的上下文。
+          </div>
+        </div>
       </template>
 
       <!-- ========== 分析：方案 + 流程图 ========== -->
@@ -308,9 +332,9 @@ import MermaidView from '../components/MermaidView.vue'
 import { useTheme } from '../useTheme'
 import { useMobile } from '../useMobile'
 import {
-  acceptFix, applyFix, getCodeRoots, getFixContext, getFixDiff, patchIssue,
-  regenerateFixContext, rejectFix, runFix, saveFixContext,
-  type CodeRoot, type TargetRepo, type FixAttempt
+  acceptFix, applyFix, clearMemory, getCodeRoots, getFixContext, getFixDiff, getMemory,
+  patchIssue, regenerateFixContext, rejectFix, runFix, saveFixContext,
+  type CodeRoot, type MemorySession, type TargetRepo, type FixAttempt
 } from '../api'
 
 const props = defineProps<{
@@ -350,6 +374,24 @@ const rejecting = ref(false)
 
 const attempts = ref<FixAttempt[]>([])
 const openAttempts = ref<number[]>([])
+
+/* ===== 对话记忆 ===== */
+const memorySessions = ref<MemorySession[]>([])
+
+const loadMemory = async () => {
+  const r = await getMemory(props.issueId).catch(() => null)
+  memorySessions.value = r?.sessions || []
+}
+
+const doClearMemory = async (kind?: string) => {
+  const label = kind
+    ? memorySessions.value.find((m) => m.kind === kind)?.kindLabel || kind
+    : '全部'
+  await ElMessageBox.confirm(`清空${label}的对话记忆？下次会从零开始。`, '提示', { type: 'warning' })
+  await clearMemory(props.issueId, kind || '')
+  await loadMemory()
+  ElMessage.success('已清空')
+}
 
 const fixPlan = computed(() => props.issue?.fix_plan || null)
 const fixState = computed(() => props.issue?.fix_state || null)
@@ -595,6 +637,7 @@ const doFix = async () => {
   try {
     const res = await runFix(props.issueId, props.channelId)
     emit('changed')
+    await loadMemory()
     tab.value = 'analysis'
     ElMessage.success(`方案已生成（${res.provider}）`)
   } catch (e: any) {
@@ -615,6 +658,7 @@ const doApply = async () => {
     emit('changed')
     diffs.value = res.diffs || {}
     if (res.attempt) loadAttempts([res.attempt, ...attempts.value])
+    await loadMemory()
     tab.value = 'worktree'
     const states = Object.values(res.state?.repos || {}) as any[]
     const failed = states.filter((s) => s.status === 'failed')
@@ -689,6 +733,7 @@ onMounted(async () => {
   await loadRoots()
   syncFromIssue()
   await loadContext()
+  await loadMemory()
 })
 </script>
 
@@ -804,6 +849,22 @@ onMounted(async () => {
 }
 .scope-warn code { display: block; font-size: 11px; opacity: 0.9; }
 .scope-warn-body { display: flex; flex-direction: column; gap: 2px; }
+
+/* 对话记忆 */
+.mem-list { display: flex; flex-direction: column; gap: 4px; }
+.mem-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 6px 10px; border-radius: 8px; background: var(--ih-soft);
+  font-size: 12px;
+}
+.mem-kind {
+  flex: 0 0 auto; padding: 1px 8px; border-radius: 999px;
+  background: var(--ih-primary-soft); color: var(--el-color-primary); font-weight: 600;
+}
+.mem-stat { color: var(--ih-sub); }
+.mem-tokens { color: var(--ih-ink); font-variant-numeric: tabular-nums; }
+.mem-time { margin-left: auto; font-size: 11px; }
+.mem-empty { padding: 4px 0; }
 
 .ctx-preview {
   display: flex; flex-direction: column; gap: 3px; cursor: pointer;

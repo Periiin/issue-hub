@@ -21,7 +21,7 @@ from typing import Any, Optional
 
 import httpx
 
-from . import codetools
+from . import codetools, memory
 from .db import connect, get_settings, now
 
 
@@ -210,7 +210,8 @@ class ApiChannelProvider:
     只读场景（allow_write=False）不注册写工具，模型看不到也就不会尝试。
     """
 
-    def __init__(self, channel: dict):
+    def __init__(self, channel: dict, session: dict | None = None,
+                 issue_id: int | None = None, kind: str = ""):
         self.channel = channel
         self.name = f"channel:{channel['id']}"
         self.base_url = (channel.get("base_url") or "").rstrip("/")
@@ -218,6 +219,10 @@ class ApiChannelProvider:
         self.model = (channel.get("model") or "").strip()
         self.temperature = float(channel.get("temperature") or 0.2)
         self.max_rounds = int(channel.get("max_rounds") or 25)
+        # 记忆：issue_id + kind 定位一条 session，与通道无关
+        self.session = session
+        self.issue_id = issue_id
+        self.kind = kind
 
     def _post(self, messages: list[dict], tools: list[dict] | None, timeout: int) -> dict:
         payload: dict[str, Any] = {
@@ -258,16 +263,33 @@ class ApiChannelProvider:
         tools = codetools.tool_specs(allow_write) if root else None
         ignore = _ignore_list()
 
+        # ===== 记忆：读历史 =====
+        # 历史只放「结论性事实」，原始对话在 session.messages 里。
+        # 这样既让模型知道前情，又不会把旧工具结果重复塞进上下文。
+        history: list[dict] = []
+        if self.session and self.session.get("messages"):
+            history = [
+                m for m in self.session["messages"]
+                if m.get("role") in ("user", "assistant") and m.get("content")
+            ][-6:]   # 只带最近几条对话轮，细节靠 memory_block
+
         messages: list[dict] = []
         if system:
             messages.append({"role": "system", "content": system})
+        for m in history:
+            messages.append({"role": m["role"], "content": m["content"]})
         messages.append({"role": "user", "content": prompt})
 
         rounds = 0
         tool_calls = 0
         text = ""
+        seen_tools: dict[str, str] = {}
+        trimmed_any = False
         while rounds < self.max_rounds:
             rounds += 1
+            # 发请求前裁剪：工具结果累积很容易撞上限
+            messages, trimmed = memory.trim_messages(messages)
+            trimmed_any = trimmed_any or trimmed
             data = self._post(messages, tools, timeout)
             try:
                 message = data["choices"][0]["message"]
@@ -301,15 +323,23 @@ class ApiChannelProvider:
                     args = {}
                 output = codetools.dispatch(root, name, args, allow_write, ignore) if root \
                     else "错误：没有可访问的工作目录"
+                # 同参数重复调用不重复回灌；单条结果再收一道长度
+                output = memory.dedupe_tool_output(seen_tools, name, args, output)
                 messages.append({
                     "role": "tool",
                     "tool_call_id": call.get("id"),
-                    "content": output[:8000],
+                    "content": output[:memory.MAX_TOOL_CHARS],
                 })
         else:
             # 用完轮数还没收敛：把已有内容当结论，并提示模型可能没做完
             text = (messages[-1].get("content") or "") if messages else ""
             text = f"（达到工具调用上限 {self.max_rounds} 轮，以下可能不完整）\n{text}"
+
+        # ===== 记忆：写回 =====
+        # 只存「干净的对话轮」：user 提问 + assistant 最终结论。
+        # 工具调用的中间过程不存 —— 它们只是过程，存下来会让下次上下文爆炸，
+        # 而且模型下次可以重新调用工具获取最新内容（代码可能已经变了）。
+        _append_session_turn(self.issue_id, self.kind, self.session, prompt, text, rounds)
 
         return AIResult(text=text, model=self.model, provider=self.name,
                         duration_ms=int((time.time() - started) * 1000),
@@ -408,25 +438,66 @@ def resolve_channel(channel_id: int | None) -> dict | None:
     return get_channel(channels[0]["id"]) if channels else None
 
 
+def _append_session_turn(issue_id: int | None, kind: str, session: dict | None,
+                         prompt: str, text: str, rounds: int) -> None:
+    """把这一轮「提问 + 结论」追加进记忆。
+
+    只存对话轮，不存工具调用过程：过程又长又会过期（代码改了就不准），
+    模型下次可以重新调用工具拿最新内容。
+    """
+    if not issue_id or not kind:
+        return
+    try:
+        prior = [
+            m for m in (session or {}).get("messages") or []
+            if m.get("role") in ("user", "assistant") and m.get("content")
+        ]
+        merged = prior + [{"role": "user", "content": prompt},
+                          {"role": "assistant", "content": text or "（无输出）"}]
+        merged = merged[-40:]   # 最多留 20 轮
+        memory.save_session(issue_id, kind, merged, rounds_add=rounds,
+                            tokens=memory.messages_tokens(merged))
+    except Exception:
+        pass
+
+
 def run_ai(channel_id: int | None, prompt: str, system: str = "",
            cwd: Optional[str] = None, timeout: Optional[int] = None,
-           allow_write: bool = False) -> AIResult:
-    """所有 AI 调用的唯一入口。channel_id 为 None 时用默认通道。"""
+           allow_write: bool = False,
+           issue_id: int | None = None, kind: str = "",
+           memory_block: str = "") -> AIResult:
+    """所有 AI 调用的唯一入口。
+
+    issue_id + kind 用于对话记忆：记忆挂在「问题 + 操作类型」上，与通道无关，
+    所以换通道、换模型都能接着上次聊。memory_block 是调用方提炼好的历史事实
+    （已确认描述、历次修改档案等），会拼在提示词前面。
+
+    channel_id 为 None 时用默认通道。
+    """
     settings = get_settings()
     limit = int(timeout or settings.get("ai.timeout") or 180)
     channel = resolve_channel(channel_id)
-    if not channel:
-        # 一个通道都没配：退回 mock，让流程能跑通
-        return MockProvider().run(prompt, system=system, cwd=cwd,
-                                  timeout=limit, allow_write=allow_write)
-    kind = (channel.get("kind") or "api").lower()
-    if kind == "mock":
-        provider = MockProvider()
-    elif kind == "agent":
+
+    # 记忆块拼在最前面：模型先看背景再看当前任务
+    full_prompt = prompt
+    if memory_block:
+        full_prompt = f"# 这个问题的已知背景\n\n{memory_block}\n\n---\n\n# 当前任务\n\n{prompt}"
+
+    session = memory.get_session(issue_id, kind) if (issue_id and kind) else None
+    provider_kind = (channel.get("kind") or "api").lower() if channel else "mock"
+
+    if not channel or provider_kind == "mock":
+        # 没有可用通道 / 显式选了 mock：仍走记忆写回，方便验证整条链路
+        result = MockProvider().run(full_prompt, system=system, cwd=cwd,
+                                    timeout=limit, allow_write=allow_write)
+        _append_session_turn(issue_id, kind, session, full_prompt, result.text, result.rounds)
+        return result
+    if provider_kind == "agent":
         provider = AgentChannelProvider(channel)
-    else:
-        provider = ApiChannelProvider(channel)
-    return provider.run(prompt, system=system, cwd=cwd, timeout=limit,
+        return provider.run(full_prompt, system=system, cwd=cwd, timeout=limit,
+                            allow_write=allow_write)
+    provider = ApiChannelProvider(channel, session=session, issue_id=issue_id, kind=kind)
+    return provider.run(full_prompt, system=system, cwd=cwd, timeout=limit,
                         allow_write=allow_write)
 
 

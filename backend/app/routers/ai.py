@@ -15,6 +15,7 @@ from ..prompts import (QUALIFY_SYSTEM, FIX_SYSTEM, TRIAGE_SYSTEM, build_fix_prom
                        build_qualify_prompt, build_triage_prompt, extract_json)
 from ..schemas import AIRequest, FixRequest, QualifyConfirm
 from ..channels import AIError, run_ai
+from .. import memory as mem
 
 router = APIRouter(prefix="/api/issues", tags=["ai"])
 
@@ -72,7 +73,9 @@ def qualify(issue_id: int, payload: AIRequest):
     paths = [str(ATTACH_DIR / p) for p in attachments]
     prompt = build_qualify_prompt(issue, paths)
     try:
-        result = run_ai(payload.channel_id, prompt, QUALIFY_SYSTEM)
+        block = mem.build_memory_block(issue, current_kind="qualify")
+        result = run_ai(payload.channel_id, prompt, QUALIFY_SYSTEM,
+                        issue_id=issue_id, kind="qualify", memory_block=block)
         data = extract_json(result.text)
     except (AIError, ValueError) as ex:
         with connect() as conn:
@@ -119,7 +122,9 @@ def triage(issue_id: int, payload: AIRequest):
     confirmed = json.loads(issue["qualify_final"])
     prompt = build_triage_prompt(confirmed)
     try:
-        result = run_ai(payload.channel_id, prompt, TRIAGE_SYSTEM)
+        block = mem.build_memory_block(issue, current_kind="triage")
+        result = run_ai(payload.channel_id, prompt, TRIAGE_SYSTEM,
+                        issue_id=issue_id, kind="triage", memory_block=block)
         data = extract_json(result.text)
     except (AIError, ValueError) as ex:
         with connect() as conn:
@@ -164,7 +169,10 @@ def make_fix_plan(issue_id: int, payload: FixRequest):
     cwd = _common_cwd(scopes)
     prompt = build_fix_prompt(confirmed, scopes, ignore_list(), project_notes())
     try:
-        result = run_ai(payload.channel_id, prompt, FIX_SYSTEM, cwd=cwd)
+        from ..fix import list_attempts
+        block = mem.build_memory_block(issue, list_attempts(issue_id), current_kind="analysis")
+        result = run_ai(payload.channel_id, prompt, FIX_SYSTEM, cwd=cwd,
+                        issue_id=issue_id, kind="analysis", memory_block=block)
         data = extract_json(result.text)
     except (AIError, ValueError) as ex:
         with connect() as conn:
