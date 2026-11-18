@@ -144,7 +144,7 @@
           <span class="step-badge">AI</span>
           <div>
             <h2>默认执行器</h2>
-            <p>单次操作也可以在详情页临时切换</p>
+            <p>定性/定级/分析/改代码都用它；单次操作可在详情页临时切换</p>
           </div>
         </div>
       </div>
@@ -374,9 +374,9 @@ const label = (p: string) =>
 const desc = (p: string) =>
   ({
     mock: '假数据，验证流程，不花额度',
-    deepseek: '快、便宜，仅看文字',
-    dsh: '同机读仓库，DeepSeek 驱动',
-    claude: '同机读仓库，适合深析'
+    deepseek: '快且便宜，只能看文字（不能改代码）',
+    dsh: '同机运行，能读仓库也能改代码',
+    claude: '同机运行，能读仓库也能改代码'
   } as any)[p] || ''
 
 const load = async () => {

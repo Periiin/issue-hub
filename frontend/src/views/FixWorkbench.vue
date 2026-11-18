@@ -101,10 +101,6 @@
           </div>
         </div>
 
-        <div v-if="selectedRepos.length && !canApply" class="apply-hint">
-          当前执行器 <b>{{ provider }}</b> 只能分析；改代码请切到 <b>claude</b> 或 <b>dsh</b>（在 ① 里切换）。
-        </div>
-
         <div class="field-block">
           <div class="field-head">
             <span class="field-title">修复边界</span>
@@ -362,9 +358,8 @@ const fixFlow = computed<string>(() => {
   return typeof raw === 'string' ? raw.trim() : ''
 })
 
-const canApply = computed(
-  () => selectedRepos.value.length > 0 && ['claude', 'dsh'].includes(props.provider)
-)
+/** 执行器由用户自己选，前端不拦：选了不能改代码的（如 deepseek），后端会给明确报错 */
+const canApply = computed(() => selectedRepos.value.length > 0)
 
 /* ===== 代码范围 × 目标仓库 ===== */
 const normPath = (p: string) => (p || '').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
@@ -809,11 +804,6 @@ onMounted(async () => {
 }
 .scope-warn code { display: block; font-size: 11px; opacity: 0.9; }
 .scope-warn-body { display: flex; flex-direction: column; gap: 2px; }
-
-.apply-hint {
-  padding: 8px 12px; border-radius: 10px; font-size: 12px; line-height: 1.6;
-  background: var(--ih-warn-soft); color: var(--ih-warn-ink);
-}
 
 .ctx-preview {
   display: flex; flex-direction: column; gap: 3px; cursor: pointer;
