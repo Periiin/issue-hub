@@ -271,3 +271,8 @@ export const getMemory = (issueId: number) =>
 /** kind 为空表示清空全部 */
 export const clearMemory = (issueId: number, kind = '') =>
   api.delete(`/issues/${issueId}/memory`, { params: kind ? { kind } : {} }).then((r) => r.data)
+
+/** 只跑验证不提交：先看看能不能编译 */
+export const verifyFix = (id: number, repo = '') =>
+  api.post(`/issues/${id}/fix/verify`, {}, { params: repo ? { repo } : {}, timeout: 600000 })
+    .then((r) => r.data)

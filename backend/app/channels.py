@@ -21,7 +21,7 @@ from typing import Any, Optional
 
 import httpx
 
-from . import codetools, memory
+from . import codetools, memory, vision
 from .db import connect, get_settings, now
 
 
@@ -163,7 +163,8 @@ class MockProvider:
     name = "mock"
 
     def run(self, prompt: str, system: str = "", cwd: Optional[str] = None,
-            timeout: int = 180, allow_write: bool = False) -> AIResult:
+            timeout: int = 180, allow_write: bool = False,
+            images: list[str] | None = None) -> AIResult:
         started = time.time()
         if "结构化的问题描述" in prompt:
             data = {
@@ -251,7 +252,8 @@ class ApiChannelProvider:
             raise AIError(f"请求通道失败：{ex}") from ex
 
     def run(self, prompt: str, system: str = "", cwd: Optional[str] = None,
-            timeout: int = 180, allow_write: bool = False) -> AIResult:
+            timeout: int = 180, allow_write: bool = False,
+            images: list[str] | None = None) -> AIResult:
         if not self.base_url:
             raise AIError("通道缺少 Base URL")
         if not self.model:
@@ -278,7 +280,9 @@ class ApiChannelProvider:
             messages.append({"role": "system", "content": system})
         for m in history:
             messages.append({"role": m["role"], "content": m["content"]})
-        messages.append({"role": "user", "content": prompt})
+        # 附件图片转多模态内容块；没有图就退回纯文本
+        user_content = vision.build_content(prompt, images)
+        messages.append({"role": "user", "content": user_content})
 
         rounds = 0
         tool_calls = 0
@@ -391,7 +395,8 @@ class AgentChannelProvider:
         return cmd + self.extra_args
 
     def run(self, prompt: str, system: str = "", cwd: Optional[str] = None,
-            timeout: int = 180, allow_write: bool = False) -> AIResult:
+            timeout: int = 180, allow_write: bool = False,
+            images: list[str] | None = None) -> AIResult:
         started = time.time()
         full = f"{system}\n\n{prompt}" if system else prompt
         workdir = cwd if cwd and Path(cwd).is_dir() else None
@@ -465,7 +470,8 @@ def run_ai(channel_id: int | None, prompt: str, system: str = "",
            cwd: Optional[str] = None, timeout: Optional[int] = None,
            allow_write: bool = False,
            issue_id: int | None = None, kind: str = "",
-           memory_block: str = "") -> AIResult:
+           memory_block: str = "",
+           images: list[str] | None = None) -> AIResult:
     """所有 AI 调用的唯一入口。
 
     issue_id + kind 用于对话记忆：记忆挂在「问题 + 操作类型」上，与通道无关，
@@ -489,16 +495,17 @@ def run_ai(channel_id: int | None, prompt: str, system: str = "",
     if not channel or provider_kind == "mock":
         # 没有可用通道 / 显式选了 mock：仍走记忆写回，方便验证整条链路
         result = MockProvider().run(full_prompt, system=system, cwd=cwd,
-                                    timeout=limit, allow_write=allow_write)
+                                    timeout=limit, allow_write=allow_write,
+                                    images=images)
         _append_session_turn(issue_id, kind, session, full_prompt, result.text, result.rounds)
         return result
     if provider_kind == "agent":
         provider = AgentChannelProvider(channel)
         return provider.run(full_prompt, system=system, cwd=cwd, timeout=limit,
-                            allow_write=allow_write)
+                            allow_write=allow_write, images=images)
     provider = ApiChannelProvider(channel, session=session, issue_id=issue_id, kind=kind)
     return provider.run(full_prompt, system=system, cwd=cwd, timeout=limit,
-                        allow_write=allow_write)
+                        allow_write=allow_write, images=images)
 
 
 def test_channel(channel_id: int, timeout: int | None = None) -> dict:

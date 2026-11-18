@@ -20,6 +20,7 @@ from fastapi import APIRouter, HTTPException
 from .. import context as ctx
 from .. import projects
 from .. import memory as mem
+from .. import verify as vfy
 from ..db import add_event, connect, get_settings, now
 from ..fix import (FixError, collect_diff, commit_all, create_worktree, current_branch,
                    drop_all_worktrees, drop_worktree, ignore_list, is_repo_root,
@@ -89,6 +90,14 @@ def _issue_repos(issue: dict) -> list[str]:
         seen.add(key)
         out.append(r)
     return out
+
+
+def _issue_images(issue_id: int) -> list[str]:
+    from ..config import ATTACH_DIR
+    with connect() as conn:
+        rows = conn.execute("SELECT path FROM attachment WHERE issue_id = ?",
+                            (issue_id,)).fetchall()
+    return [str(ATTACH_DIR / r["path"]) for r in rows]
 
 
 def _issue_scopes(issue: dict) -> list[str]:
@@ -248,6 +257,7 @@ def apply_fix(issue_id: int, payload: FixApplyReq):
             block = mem.build_memory_block(issue, list_attempts(issue_id), current_kind="apply")
             result = run_ai(payload.channel_id, prompt, APPLY_SYSTEM, cwd=info["worktree"],
                             issue_id=issue_id, kind="apply", memory_block=block,
+                            images=_issue_images(issue_id),
                             timeout=timeout, allow_write=True)
         except AIError as ex:
             # 单个仓库失败不影响其它仓库，也不立刻删 worktree（便于人工排查）
@@ -458,6 +468,35 @@ def fix_diff(issue_id: int, repo: str | None = None):
     return {"state": state, "diffs": diffs}
 
 
+@router.post("/issues/{issue_id}/fix/verify")
+def verify_fix(issue_id: int, repo: str = ""):
+    """只跑验证不提交，用于「先看看能不能编译」。"""
+    with connect() as conn:
+        issue = _issue(conn, issue_id)
+    state = _norm_state(issue)
+    repos = state.get("repos") or {}
+    targets = [repo] if repo else [r for r, st in repos.items() if st.get("worktree")]
+    if not targets:
+        raise HTTPException(404, "还没有可验证的 worktree")
+
+    project = projects.get_project(issue["project_id"]) if issue.get("project_id") else None
+    out = {}
+    for r in targets:
+        st = repos.get(r) or {}
+        if not st.get("worktree"):
+            out[r] = {"ok": False, "error": "没有 worktree"}
+            continue
+        out[r] = vfy.verify_worktree(r, st["worktree"], (project or {}).get("verify_cmd") or "")
+        # 结果也存进 fix_state，前端刷新后还能看到
+        st["verify"] = out[r]
+        repos[r] = st
+    state["repos"] = repos
+    with connect() as conn:
+        conn.execute("UPDATE issue SET fix_state = ?, updated_at = ? WHERE id = ?",
+                     (json.dumps(state, ensure_ascii=False), now(), issue_id))
+    return {"results": out}
+
+
 @router.post("/issues/{issue_id}/fix/accept")
 def accept_fix(issue_id: int, payload: FixAcceptReq):
     """采纳：按仓库独立提交/合并。不传 repo 时采纳全部有改动的仓库。"""
@@ -482,6 +521,19 @@ def accept_fix(issue_id: int, payload: FixAcceptReq):
             results[repo] = {"ok": False, "error": st.get("error") or "没有可采纳的改动"}
             continue
 
+        # ===== 采纳前强制验证 =====
+        # 模型改完不等于能编译。不验证就合并，等于把风险推给用户。
+        project = projects.get_project(issue["project_id"]) if issue.get("project_id") else None
+        v = vfy.verify_worktree(st["repo"], st["worktree"], (project or {}).get("verify_cmd") or "")
+        st["verify"] = v
+        if v.get("ok") is False:
+            results[repo] = {
+                "ok": False,
+                "error": "验证未通过，已阻止采纳",
+                "verify": v,
+            }
+            continue   # 不提交、不合并
+
         message = (payload.message or "").strip() or f"fix(issue-{issue_id}): {issue['title']}"
         try:
             committed = commit_all(st["worktree"], message)
@@ -502,7 +554,7 @@ def accept_fix(issue_id: int, payload: FixAcceptReq):
 
         st.update({"accepted": True, "accepted_at": now(),
                    "commit_message": message, "merge": merge_result})
-        results[repo] = {"ok": True, "merge": merge_result}
+        results[repo] = {"ok": True, "merge": merge_result, "verify": v}
 
     accepted = [r for r, s in repos.items() if s.get("accepted")]
     with connect() as conn:

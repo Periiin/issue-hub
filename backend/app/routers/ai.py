@@ -48,6 +48,15 @@ def _json_list(raw) -> list[str]:
         return []
 
 
+def _issue_images(issue_id: int) -> list[str]:
+    """取该问题的附件图片绝对路径（vision 层会过滤掉非图片/过大/读失败的）。"""
+    from ..config import ATTACH_DIR
+    with connect() as conn:
+        rows = conn.execute("SELECT path FROM attachment WHERE issue_id = ?",
+                            (issue_id,)).fetchall()
+    return [str(ATTACH_DIR / r["path"]) for r in rows]
+
+
 def _common_cwd(scopes: list[str]) -> str | None:
     """多个目录时取公共父目录，让 agent 能跨项目搜索；单目录直接用它。"""
     if not scopes:
@@ -74,8 +83,10 @@ def qualify(issue_id: int, payload: AIRequest):
     prompt = build_qualify_prompt(issue, paths)
     try:
         block = mem.build_memory_block(issue, current_kind="qualify")
+        # 图片交给 vision 层转多模态；不支持图片的通道会自动退回纯文本
         result = run_ai(payload.channel_id, prompt, QUALIFY_SYSTEM,
-                        issue_id=issue_id, kind="qualify", memory_block=block)
+                        issue_id=issue_id, kind="qualify", memory_block=block,
+                        images=paths)
         data = extract_json(result.text)
     except (AIError, ValueError) as ex:
         with connect() as conn:
@@ -124,7 +135,8 @@ def triage(issue_id: int, payload: AIRequest):
     try:
         block = mem.build_memory_block(issue, current_kind="triage")
         result = run_ai(payload.channel_id, prompt, TRIAGE_SYSTEM,
-                        issue_id=issue_id, kind="triage", memory_block=block)
+                        issue_id=issue_id, kind="triage", memory_block=block,
+                        images=_issue_images(issue_id))
         data = extract_json(result.text)
     except (AIError, ValueError) as ex:
         with connect() as conn:
@@ -172,7 +184,8 @@ def make_fix_plan(issue_id: int, payload: FixRequest):
         from ..fix import list_attempts
         block = mem.build_memory_block(issue, list_attempts(issue_id), current_kind="analysis")
         result = run_ai(payload.channel_id, prompt, FIX_SYSTEM, cwd=cwd,
-                        issue_id=issue_id, kind="analysis", memory_block=block)
+                        issue_id=issue_id, kind="analysis", memory_block=block,
+                        images=_issue_images(issue_id))
         data = extract_json(result.text)
     except (AIError, ValueError) as ex:
         with connect() as conn:

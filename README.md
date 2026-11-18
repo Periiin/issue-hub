@@ -41,6 +41,50 @@ cd /src/issue-hub
 配置项：名称、Base URL、API Key、模型（可点「拉取模型」从 `/v1/models` 取）、
 温度、工具循环最大轮数。有「测试」按钮做真实连通性检查。
 
+### 截图识别（多模态）
+
+甲方截图里的报错和界面状态往往是最关键的信息。API 通道会把附件图片转成
+base64 的 `image_url` 内容块（`app/vision.py`）：
+
+```python
+[{"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}},
+ {"type": "text", "text": "问题描述 + 指令"}]
+```
+
+- 支持 png/jpeg/webp/gif，单张 ≤4MB，单次最多 6 张
+- 转不进去的图（超限/格式不支持）会在文本里注明「有 N 个附件无法读取，
+  请不要猜测图中信息」——避免模型臆造
+- 没有可用图片时退回纯字符串，兼容只支持文本的模型
+- claude / dsh 这类能自己读文件的 agent 走文件路径，不重复编码
+
+### 采纳前强制验证
+
+模型改完代码 ≠ 代码能编译。采纳时会在 **worktree 里**先跑验证，失败就阻止提交。
+
+命令优先级：`project.verify_cmd`（手动配）→ 自动推断：
+
+| 特征 | 推断命令 |
+|---|---|
+| `pom.xml` | `mvn -q -DskipTests compile` |
+| `build.gradle` | `./gradlew -q compileJava` |
+| `package.json` 有 type-check/typecheck/lint/build | `npm run <那个脚本>` |
+| 有 `tsconfig.json` | `npx vue-tsc --noEmit \|\| npx tsc --noEmit` |
+| `go.mod` / `Cargo.toml` | `go build ./...` / `cargo check` |
+
+推断不出来时 `ok=null`（跳过，不阻断），但会在 UI 里提示「未验证」。
+
+接口：`POST /api/issues/{id}/fix/verify`（只验证不提交，UI 有「先验证」按钮）。
+
+### 手机端（PWA）
+
+`frontend/public/` 里有 manifest、service worker、图标。手机浏览器打开后
+「添加到主屏幕」即可像 App 一样使用，支持：
+- 静态资源缓存（二次打开秒开）
+- 离线兜底页
+- **API 请求不缓存**（issue 数据必须实时，缓存了看到过期状态更糟）
+
+注意：service worker 只在 https 或 localhost 下生效，**局域网 http 访问不会注册**。
+
 ### 对话记忆
 
 **记忆挂在「问题」上，不挂在 agent 上**。同一个 issue 的同一类操作共用一个 session，

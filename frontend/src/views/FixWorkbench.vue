@@ -175,6 +175,7 @@
           <div class="wt-toolbar">
             <span class="ih-muted">{{ repoStateList.length }} 个仓库</span>
             <el-button size="small" round @click="refreshDiff">刷新 diff</el-button>
+            <el-button size="small" round :loading="verifying" @click="doVerify()">先验证</el-button>
             <el-button
               v-if="hasAnyDiff && repoStateList.some((r) => !r.state.accepted && r.state.status !== 'failed')"
               size="small" round type="success" :loading="accepting" @click="doAccept()"
@@ -218,6 +219,19 @@
               <b>已采纳</b>
               <span v-if="r.state.merge?.merged">已合并到 {{ r.state.merge.base_branch }}</span>
               <span v-else>已提交到分支，需人工合并：<code>{{ r.state.merge?.command }}</code></span>
+            </div>
+
+            <!-- 验证结果：采纳前系统会自动跑，这里也展示手动验证的结果 -->
+            <div v-if="r.state.verify" class="verify-box" :class="r.state.verify.ok === false ? 'is-bad' : r.state.verify.ok ? 'is-good' : 'is-skip'">
+              <div class="verify-head">
+                <b v-if="r.state.verify.ok === false">验证未通过</b>
+                <b v-else-if="r.state.verify.ok">验证通过</b>
+                <b v-else>未验证</b>
+                <code v-if="r.state.verify.cmd">{{ r.state.verify.cmd }}</code>
+                <span v-if="r.state.verify.detected" class="ih-muted">（自动推断）</span>
+              </div>
+              <pre v-if="r.state.verify.output" class="verify-out">{{ r.state.verify.output }}</pre>
+              <div v-if="r.state.verify.reason" class="ih-muted">{{ r.state.verify.reason }}</div>
             </div>
 
             <template v-if="r.state.status !== 'failed'">
@@ -333,7 +347,7 @@ import { useTheme } from '../useTheme'
 import { useMobile } from '../useMobile'
 import {
   acceptFix, applyFix, clearMemory, getCodeRoots, getFixContext, getFixDiff, getMemory,
-  patchIssue, regenerateFixContext, rejectFix, runFix, saveFixContext,
+  patchIssue, regenerateFixContext, rejectFix, runFix, saveFixContext, verifyFix,
   type CodeRoot, type MemorySession, type TargetRepo, type FixAttempt
 } from '../api'
 
@@ -371,6 +385,7 @@ const fixing = ref(false)
 const applying = ref(false)
 const accepting = ref(false)
 const rejecting = ref(false)
+const verifying = ref(false)
 
 const attempts = ref<FixAttempt[]>([])
 const openAttempts = ref<number[]>([])
@@ -619,6 +634,33 @@ const loadDiff = async () => {
   }
 }
 
+/** 手动跑验证（采纳时会自动再跑一次，这里只是提前看结果） */
+const doVerify = async (repo?: string) => {
+  verifying.value = true
+  try {
+    const res = await verifyFix(props.issueId, repo || '')
+    await emitChangedAndReload()
+    const results = Object.values(res.results || {}) as any[]
+    const bad = results.filter((r) => r?.ok === false)
+    if (bad.length) {
+      ElMessage.error(`验证未通过：${bad[0]?.output?.slice(0, 80) || '看下方输出'}`)
+    } else if (results.every((r) => r?.ok === null)) {
+      ElMessage.warning('这些仓库没有可用的验证命令，采纳不会被拦')
+    } else {
+      ElMessage.success('验证通过')
+    }
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.detail || '验证失败')
+  } finally {
+    verifying.value = false
+  }
+}
+
+const emitChangedAndReload = async () => {
+  emit('changed')
+  await loadDiff()
+}
+
 const refreshDiff = async () => {
   await loadDiff()
   ElMessage.success('已刷新')
@@ -687,7 +729,12 @@ const doAccept = async (repo?: string) => {
     const merged = results.filter(([, r]: any) => r?.merge?.merged).length
     const notMerged = results.filter(([, r]: any) => r?.ok && !r?.merge?.merged)
     const bad = results.filter(([, r]: any) => !r?.ok)
-    if (bad.length) ElMessage.error(`${bad.length} 个仓库采纳失败：${(bad[0][1] as any).error || ''}`)
+    if (bad.length) {
+      const first = (bad[0][1] as any)
+      ElMessage.error(first?.error?.includes('验证未通过')
+        ? '验证未通过，已阻止采纳（看下方编译输出）'
+        : `${bad.length} 个仓库采纳失败：${first?.error || ''}`)
+    }
     else if (notMerged.length) ElMessage.warning('已提交到分支，需人工合并')
     else ElMessage.success(`已合并 ${merged} 个仓库`)
   } catch (e: any) {
@@ -849,6 +896,23 @@ onMounted(async () => {
 }
 .scope-warn code { display: block; font-size: 11px; opacity: 0.9; }
 .scope-warn-body { display: flex; flex-direction: column; gap: 2px; }
+
+/* 验证结果 */
+.verify-box {
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 9px 11px; border-radius: 10px; font-size: 12px;
+}
+.verify-box.is-good { background: var(--ih-success-soft); color: var(--ih-success-ink); }
+.verify-box.is-bad { background: rgba(240, 68, 56, 0.1); color: #f04438; }
+.verify-box.is-skip { background: var(--ih-soft); color: var(--ih-sub); }
+.verify-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.verify-head code { font-size: 11px; opacity: 0.85; }
+.verify-out {
+  margin: 0; max-height: 200px; overflow: auto; padding: 8px;
+  background: var(--ih-card); border-radius: 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px; line-height: 1.5; white-space: pre-wrap; color: var(--ih-ink);
+}
 
 /* 对话记忆 */
 .mem-list { display: flex; flex-direction: column; gap: 4px; }

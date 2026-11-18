@@ -165,6 +165,7 @@ def _row(r) -> dict:
     except json.JSONDecodeError:
         d["repos"] = []
     d["ignored"] = bool(d.get("ignored"))
+    d["verify_cmd"] = d.get("verify_cmd") or ""
     return d
 
 
@@ -199,18 +200,21 @@ def find_project_by_repo(repo: str) -> dict | None:
     return None
 
 
-def create_project(name: str, repos: list[str], notes: str = "") -> int:
+def create_project(name: str, repos: list[str], notes: str = "",
+                   verify_cmd: str = "") -> int:
     ts = now()
     with connect() as conn:
         cur = conn.execute(
-            "INSERT INTO project(name, repos, notes, ignored, sort, created_at, updated_at) "
-            "VALUES (?, ?, ?, 0, 0, ?, ?)",
-            (name.strip() or "未命名项目", json.dumps(repos, ensure_ascii=False), notes, ts, ts))
+            "INSERT INTO project(name, repos, notes, verify_cmd, ignored, sort, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, 0, 0, ?, ?)",
+            (name.strip() or "未命名项目", json.dumps(repos, ensure_ascii=False), notes,
+             (verify_cmd or "").strip(), ts, ts))
         return cur.lastrowid
 
 
 def update_project(project_id: int, name: str | None = None, repos: list[str] | None = None,
-                   notes: str | None = None, ignored: bool | None = None) -> bool:
+                   notes: str | None = None, ignored: bool | None = None,
+                   verify_cmd: str | None = None) -> bool:
     fields, args = [], []
     if name is not None:
         fields.append("name = ?")
@@ -224,6 +228,9 @@ def update_project(project_id: int, name: str | None = None, repos: list[str] | 
     if ignored is not None:
         fields.append("ignored = ?")
         args.append(1 if ignored else 0)
+    if verify_cmd is not None:
+        fields.append("verify_cmd = ?")
+        args.append(verify_cmd.strip())
     if not fields:
         return False
     fields.append("updated_at = ?")

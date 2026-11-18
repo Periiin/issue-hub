@@ -15,6 +15,7 @@ class ProjectCreate(BaseModel):
     name: str = ""
     repos: list[str] = []
     notes: str = ""
+    verify_cmd: str = ""
 
 
 class ProjectUpdate(BaseModel):
@@ -22,6 +23,8 @@ class ProjectUpdate(BaseModel):
     repos: Optional[list[str]] = None
     notes: Optional[str] = None
     ignored: Optional[bool] = None
+    # 采纳前跑的验证命令；留空则按仓库特征自动推断
+    verify_cmd: Optional[str] = None
 
 
 class ProjectMerge(BaseModel):
@@ -48,7 +51,7 @@ def add_project(payload: ProjectCreate):
     repos = _check_repos(payload.repos)
     if not repos:
         raise HTTPException(400, "至少要包含一个 git 仓库")
-    pid = create_project(payload.name, repos, payload.notes)
+    pid = create_project(payload.name, repos, payload.notes, payload.verify_cmd)
     return {"id": pid, "project": get_project(pid)}
 
 
@@ -58,7 +61,8 @@ def patch_project(project_id: int, payload: ProjectUpdate):
         raise HTTPException(404, "项目不存在")
     repos = _check_repos(payload.repos) if payload.repos is not None else None
     update_project(project_id, name=payload.name, repos=repos,
-                   notes=payload.notes, ignored=payload.ignored)
+                   notes=payload.notes, ignored=payload.ignored,
+                   verify_cmd=payload.verify_cmd)
     return {"project": get_project(project_id)}
 
 

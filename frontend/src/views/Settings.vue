@@ -134,6 +134,17 @@
                 @blur="saveNotes(p)"
               />
             </div>
+            <div class="proj-detail-block">
+              <span class="proj-detail-label">采纳前的验证命令</span>
+              <el-input
+                v-model="p._verifyCmd" size="small"
+                placeholder="留空则自动推断，如 mvn -q -DskipTests compile / npm run type-check"
+                @blur="saveVerifyCmd(p)"
+              />
+              <span class="field-hint">
+                在 worktree 里跑，失败会阻止采纳。留空时按仓库特征自动选（pom.xml → Maven，package.json → npm 脚本）
+              </span>
+            </div>
           </div>
         </div>
         <div v-if="!filteredProjects.length" class="ih-muted proj-empty">
@@ -479,7 +490,11 @@ const filteredProjects = computed(() => {
 
 const loadProjects = async () => {
   const r = await getProjects().catch(() => null)
-  if (r) projects.value = (r.projects || []).map((p) => ({ ...p, _notes: p.notes || '' }))
+  if (r) {
+    projects.value = (r.projects || []).map((p) => ({
+      ...p, _notes: p.notes || '', _verifyCmd: p.verify_cmd || ''
+    }))
+  }
 }
 
 const doScan = async () => {
@@ -532,6 +547,13 @@ const saveNotes = async (p: Project & { _notes?: string }) => {
   if ((p._notes || '') === (p.notes || '')) return
   await updateProject(p.id, { notes: p._notes || '' })
   p.notes = p._notes
+}
+
+const saveVerifyCmd = async (p: Project & { _verifyCmd?: string }) => {
+  if ((p._verifyCmd || '') === (p.verify_cmd || '')) return
+  await updateProject(p.id, { verify_cmd: p._verifyCmd || '' } as any)
+  p.verify_cmd = p._verifyCmd
+  ElMessage.success('已保存')
 }
 
 const toggleIgnore = async (p: Project) => {

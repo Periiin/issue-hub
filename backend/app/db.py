@@ -85,6 +85,7 @@ CREATE TABLE IF NOT EXISTS project (
     name        TEXT NOT NULL,
     repos       TEXT,                  -- JSON 数组：仓库绝对路径（各自是独立 git 仓库）
     notes       TEXT,                  -- 给 AI 看的项目说明（可选，会拼进提示词）
+    verify_cmd  TEXT,                  -- 采纳前跑的验证命令（如 mvn -q compile / npx vue-tsc）
     ignored     INTEGER NOT NULL DEFAULT 0,
     sort        INTEGER NOT NULL DEFAULT 0,
     created_at  TEXT NOT NULL,
@@ -175,6 +176,10 @@ def init_db() -> None:
         ):
             if column not in existing:
                 conn.execute(ddl)
+        # project 表补列
+        proj_cols = {r["name"] for r in conn.execute("PRAGMA table_info(project)").fetchall()}
+        if "verify_cmd" not in proj_cols:
+            conn.execute("ALTER TABLE project ADD COLUMN verify_cmd TEXT")
         # 默认配置只补不覆盖，避免每次启动把用户改过的值重置
         for key, value in DEFAULT_SETTINGS.items():
             conn.execute("INSERT OR IGNORE INTO setting(key, value) VALUES (?, ?)", (key, value))

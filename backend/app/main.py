@@ -51,10 +51,25 @@ if (FRONTEND_DIST / "assets").exists():
     app.mount("/assets", StaticFiles(directory=str(FRONTEND_DIST / "assets")), name="assets")
 
 
+# PWA 静态文件：manifest / service worker / 图标。
+# 这几个必须在 SPA 兜底路由之前，否则会被 index.html 顶掉。
+_PWA_FILES = {
+    "manifest.webmanifest": "application/manifest+json",
+    "sw.js": "application/javascript",
+    "icon-192.png": "image/png",
+    "icon-512.png": "image/png",
+    "favicon.ico": "image/x-icon",
+}
+
+
 @app.get("/{path:path}")
 def spa(path: str):
     if path.startswith("api/"):
         return JSONResponse({"detail": "Not Found"}, status_code=404)
+    if path in _PWA_FILES:
+        f = FRONTEND_DIST / path
+        if f.is_file():
+            return FileResponse(f, media_type=_PWA_FILES[path])
     index = FRONTEND_DIST / "index.html"
     if index.exists():
         return FileResponse(index)
