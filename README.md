@@ -27,18 +27,39 @@ cd /src/issue-hub
    **当前版本不改代码**，只给方案；改代码建议在 worktree 里做、人工合并。
 6. **导出**：单条「导出 Markdown」，列表页「导出周报」按优先级分组。
 
-## AI 执行器
+## AI 通道
 
-在「设置」里选默认执行器，单次操作也可以临时切换（详情页有下拉框）。
+「执行器」这个概念被换成了「通道」：用户真正拥有的是一组 API 端点和模型名，
+而不是写死的三选一。设置页可以配任意多个通道，issue 上记住上次用的。
 
-| 执行器 | 说明 | 需要什么 |
+| 类型 | 说明 | 能改代码 |
 |---|---|---|
-| `mock` | 返回固定假数据，用来验证流程，不花额度 | 无 |
-| `deepseek` | 调 DeepSeek OpenAI 兼容接口，快、便宜，**看不到代码** | API Key |
-| `dsh` | `dsh --profile headless "<任务>"`，同机可读仓库 | 本机装好 dsh |
-| `claude` | `claude -p "<任务>"`，同机可读仓库（只读工具白名单） | 本机装好 claude |
+| **API 端点** | OpenAI 兼容格式（官方 / 中转站 / 自建都行） | ✅ 靠内置工具循环 |
+| **本地 Agent** | `claude` / `dsh` 这类命令行，自带文件工具 | ✅ 开箱即可 |
+| **Mock** | 假数据，验证流程不花额度 | ❌ |
 
-提示词在 `backend/app/prompts.py`，定级规则带版本号（`RUBRIC_VERSION`），改规则时递增即可追溯。
+配置项：名称、Base URL、API Key、模型（可点「拉取模型」从 `/v1/models` 取）、
+温度、工具循环最大轮数。有「测试」按钮做真实连通性检查。
+
+### API 通道的工具循环
+
+纯 API 只能返回文本，没法读写文件。为了让它也能改代码，后端自己实现了
+function calling 循环（`app/codetools.py`）：
+
+```
+用户问题 + tools 定义  →  模型返回 tool_calls
+                          ↓ 执行（read/list/grep/write/edit）
+                       结果回灌 → 模型继续 → … → 输出结论
+```
+
+工具：`list_dir`、`read_file`、`grep`，写入场景额外给 `write_file`、`edit_file`。
+只读场景（定性/定级）**不注册写工具**，模型看不到也就不会尝试。
+
+安全边界：
+- 所有路径必须落在 worktree 内（`_safe_path`），越界直接拒绝
+- 单次读取 40K 字符、grep 80 条上限，防上下文爆炸
+- 不提供 shell / delete / move，改动只能由 git diff 呈现
+- `max_rounds` 控制轮数，用完会标注「可能不完整」
 
 ## 主题（亮 / 暗）
 

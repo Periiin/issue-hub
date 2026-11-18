@@ -115,8 +115,8 @@
             </div>
           </div>
           <div class="panel-actions" @click.stop>
-            <el-select v-model="provider" class="provider-select">
-              <el-option v-for="p in providers" :key="p" :label="p" :value="p" />
+            <el-select v-model="channelId" class="provider-select" placeholder="默认通道">
+              <el-option v-for="c in channels" :key="c.id" :label="c.name" :value="c.id" />
             </el-select>
             <el-button type="primary" round :loading="qualifying" @click="doQualify">
               {{ issue.qualify_final ? '重新定性' : 'AI 定性' }}
@@ -256,7 +256,7 @@
 
     <!-- ================= 右栏：操作台（宽屏） ================= -->
     <aside v-if="!isMobile" class="detail-side">
-      <FixWorkbench :issue-id="id" :issue="issue" :provider="provider" :project-id="projectId" @changed="refresh" />
+      <FixWorkbench :issue-id="id" :issue="issue" :channel-id="channelId" :project-id="projectId" @changed="refresh" />
     </aside>
 
     <!-- 手机：折叠成底部抽屉 -->
@@ -276,7 +276,7 @@
         </div>
         <div class="wb-drawer-body">
           <FixWorkbench
-            v-if="workbenchOpen" :issue-id="id" :issue="issue" :provider="provider"
+            v-if="workbenchOpen" :issue-id="id" :issue="issue" :channel-id="channelId"
             :project-id="projectId" @changed="refresh"
           />
         </div>
@@ -294,8 +294,9 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import FixWorkbench from './FixWorkbench.vue'
 import { useMobile } from '../useMobile'
 import {
-  confirmQualify, deleteAttachment, deleteIssue, fileUrl, getIssue, getProjects,
-  getSettings, patchIssue, runQualify, runTriage, uploadAttachments, type Project
+  confirmQualify, deleteAttachment, deleteIssue, fileUrl, getChannels, getIssue, getProjects,
+  getSettings, patchIssue, runQualify, runTriage, uploadAttachments,
+  type Channel, type Project
 } from '../api'
 
 const route = useRoute()
@@ -307,8 +308,9 @@ const issue = ref<any>(null)
 const attachments = ref<any[]>([])
 const events = ref<any[]>([])
 const allStatus = ref<string[]>([])
-const providers = ref<string[]>(['mock', 'deepseek', 'dsh', 'claude'])
-const provider = ref('mock')
+/** AI 通道列表；channelId 为空表示用设置里的默认通道 */
+const channels = ref<Channel[]>([])
+const channelId = ref<number | null>(null)
 
 const rawText = ref('')
 const pendingFiles = ref<File[]>([])
@@ -478,7 +480,7 @@ const doQualify = async () => {
   qualifying.value = true
   sections.qualify = true
   try {
-    const res = await runQualify(id.value, provider.value)
+    const res = await runQualify(id.value, channelId.value)
     fillQualifyForm(res.draft)
     await refresh()
     ElMessage.success(`定性完成（${res.provider}，${res.durationMs}ms）`)
@@ -517,7 +519,7 @@ const doConfirm = async () => {
 const doTriage = async () => {
   triaging.value = true
   try {
-    const res = await runTriage(id.value, provider.value)
+    const res = await runTriage(id.value, channelId.value)
     await refresh()
     ElMessage.success(`定级完成：${res.triage.priority} / ${res.triage.severity}`)
   } catch (e: any) {
@@ -575,11 +577,13 @@ watch(() => route.params.id, async () => {
 })
 
 onMounted(async () => {
-  const [s] = await Promise.all([
+  const [s, ch] = await Promise.all([
     getSettings().catch(() => null),
+    getChannels().catch(() => null),
     loadProjects()
   ])
-  if (s) providers.value = s.providers
+  if (ch) channels.value = ch.channels || []
+  if (s?.settings?.['ai.channel_id']) channelId.value = Number(s.settings['ai.channel_id'])
   await load()
 })
 </script>

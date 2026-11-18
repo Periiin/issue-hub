@@ -317,8 +317,8 @@ const props = defineProps<{
   issueId: number
   /** 父级加载好的 issue（含 fix_plan / fix_state / attempts / code_scopes 等） */
   issue: any
-  /** 当前执行器：mock/deepseek 不能改代码 */
-  provider: string
+  /** 当前 AI 通道 id；为空表示用设置里的默认通道 */
+  channelId?: number | null
   /** 所属项目：决定代码范围与可改仓库的候选 */
   projectId?: number | null
 }>()
@@ -593,7 +593,7 @@ const diffLineClass = (line: string) => {
 const doFix = async () => {
   fixing.value = true
   try {
-    const res = await runFix(props.issueId, props.provider)
+    const res = await runFix(props.issueId, props.channelId)
     emit('changed')
     tab.value = 'analysis'
     ElMessage.success(`方案已生成（${res.provider}）`)
@@ -611,7 +611,7 @@ const doApply = async () => {
   }
   applying.value = true
   try {
-    const res = await applyFix(props.issueId, { provider: props.provider, repos: selectedRepos.value })
+    const res = await applyFix(props.issueId, { channel_id: props.channelId, repos: selectedRepos.value })
     emit('changed')
     diffs.value = res.diffs || {}
     if (res.attempt) loadAttempts([res.attempt, ...attempts.value])

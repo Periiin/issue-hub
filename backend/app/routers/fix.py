@@ -25,7 +25,7 @@ from ..fix import (FixError, collect_diff, commit_all, create_worktree, current_
                    list_code_roots, list_target_repos, list_attempts, merge_to_base,
                    next_attempt_seq, project_notes, worktree_path)
 from ..prompts import APPLY_SYSTEM, build_apply_prompt, parse_apply_report
-from ..providers import AIError, run_ai
+from ..channels import AIError, resolve_channel, run_ai
 from ..schemas import (ContextUpdate, FixAcceptReq, FixApplyReq, FixRejectReq)
 
 router = APIRouter(prefix="/api", tags=["fix"])
@@ -71,12 +71,13 @@ def _issue_repos(issue: dict) -> list[str]:
     去重按归一化路径：同一个仓库可能因分隔符不同被存成两份。
     """
     repos = _json(issue.get("target_repos")) or []
-    if not repos and issue.get("target_repo"):
-        repos = [issue["target_repo"]]
     if not repos and issue.get("project_id"):
         project = projects.get_project(issue["project_id"])
-        if project:
-            repos = project.get("repos") or []
+        if project and project.get("repos"):
+            repos = project["repos"]
+    # 旧字段只在「既没手选仓库、也没项目」时兜底，否则会盖掉项目范围
+    if not repos and issue.get("target_repo"):
+        repos = [issue["target_repo"]]
     seen, out = set(), []
     for r in repos:
         if not r:
@@ -210,10 +211,10 @@ def apply_fix(issue_id: int, payload: FixApplyReq):
             raise HTTPException(400, f"{r} 不是 git 仓库根目录，不能作为修改目标")
 
     settings = get_settings()
-    provider = (payload.provider or settings.get("ai.provider") or "").strip().lower()
-    if provider not in WRITE_PROVIDERS:
-        raise HTTPException(
-            400, f"当前执行器 {provider or '未配置'} 不能改代码；请切到 claude 或 dsh（它们能在工作目录里编辑文件）")
+    channel = resolve_channel(payload.channel_id)
+    if channel and (channel.get("kind") or "").lower() == "mock":
+        raise HTTPException(400, "Mock 通道不会真的改代码，请选一个真实通道")
+    provider = channel.get("name") if channel else "mock"
 
     scopes = _issue_scopes(issue)
     plan = _json(issue.get("fix_plan"))
@@ -243,7 +244,7 @@ def apply_fix(issue_id: int, payload: FixApplyReq):
         prompt = build_apply_prompt(confirmed, info["worktree"], plan,
                                    boundary=boundary, context_file=ctx_file)
         try:
-            result = run_ai(provider, prompt, APPLY_SYSTEM, cwd=info["worktree"],
+            result = run_ai(payload.channel_id, prompt, APPLY_SYSTEM, cwd=info["worktree"],
                             timeout=timeout, allow_write=True)
         except AIError as ex:
             # 单个仓库失败不影响其它仓库，也不立刻删 worktree（便于人工排查）
@@ -298,6 +299,22 @@ def apply_fix(issue_id: int, payload: FixApplyReq):
     attempt = _save_attempt(issue_id, provider, state)
     return {"state": state, "diffs": _collect_diffs(state), "context": ctx_file,
             "attempt": attempt}
+
+
+def _as_text(value) -> str:
+    """模型返回的字段可能是字符串、数组或对象，统一成可入库的文本。
+
+    实测：verification 有时给 ["a","b"]，有时给 "a；b"，直接 join 会 TypeError。
+    """
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, (list, tuple)):
+        return "；".join(str(x).strip() for x in value if str(x).strip())
+    if isinstance(value, dict):
+        return "；".join(f"{k}: {v}" for k, v in value.items())
+    return str(value)
 
 
 def _save_attempt(issue_id: int, provider: str, state: dict) -> dict:
@@ -356,16 +373,16 @@ def _save_attempt(issue_id: int, provider: str, state: dict) -> dict:
             "deviations, found_issues, files, risks, verification, repos, raw_report, created_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (issue_id, seq, provider, attempt_status,
-             "；".join(filter(None, ((st.get("summary") or "")[:300] for st in repo_states.values()))),
+             "；".join(filter(None, (_as_text(st.get("summary"))[:300] for st in repo_states.values()))),
              actual_root,
              json.dumps(deviations, ensure_ascii=False),
              json.dumps(found_issues, ensure_ascii=False),
              json.dumps(files, ensure_ascii=False),
              json.dumps(risks, ensure_ascii=False),
-             "；".join(filter(None, ((st.get("report") or {}).get("verification") or ""
+             "；".join(filter(None, (_as_text((st.get("report") or {}).get("verification"))
                                      for st in repo_states.values()))),
              json.dumps(repo_brief, ensure_ascii=False),
-             "；".join(filter(None, ((st.get("summary") or "") for st in repo_states.values())))[:5000],
+             "；".join(filter(None, (_as_text(st.get("summary")) for st in repo_states.values())))[:5000],
              now()))
         row = conn.execute("SELECT * FROM fix_attempt WHERE issue_id = ? AND seq = ?",
                            (issue_id, seq)).fetchone()

@@ -34,7 +34,8 @@ class IssuePatch(BaseModel):
 
 
 class AIRequest(BaseModel):
-    provider: Optional[str] = None
+    # 通道 id；不传则用设置里的默认通道
+    channel_id: Optional[int] = None
 
 
 class QualifyConfirm(BaseModel):
@@ -50,12 +51,12 @@ class QualifyConfirm(BaseModel):
 
 
 class FixRequest(BaseModel):
-    provider: Optional[str] = None
+    channel_id: Optional[int] = None
 
 
 class FixApplyReq(BaseModel):
-    """开始改代码：给每个目标仓库建 worktree，让 agent 各自动手。"""
-    provider: Optional[str] = None
+    """开始改代码：给每个目标仓库建 worktree，让模型各自动手。"""
+    channel_id: Optional[int] = None
     # 本次要改的仓库列表；不传则用 issue.target_repos
     repos: Optional[list[str]] = None
     # 兼容旧字段：单个仓库

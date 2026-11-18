@@ -56,17 +56,17 @@ export const uploadAttachments = (id: number, files: File[]) => {
 export const deleteAttachment = (issueId: number, attachmentId: number) =>
   api.delete(`/issues/${issueId}/attachments/${attachmentId}`).then((r) => r.data)
 
-export const runQualify = (id: number, provider?: string) =>
-  api.post(`/issues/${id}/qualify`, { provider }).then((r) => r.data)
+export const runQualify = (id: number, channelId?: number | null) =>
+  api.post(`/issues/${id}/qualify`, { channel_id: channelId }).then((r) => r.data)
 
 export const confirmQualify = (id: number, data: Record<string, any>) =>
   api.post(`/issues/${id}/qualify/confirm`, data).then((r) => r.data)
 
-export const runTriage = (id: number, provider?: string) =>
-  api.post(`/issues/${id}/triage`, { provider }).then((r) => r.data)
+export const runTriage = (id: number, channelId?: number | null) =>
+  api.post(`/issues/${id}/triage`, { channel_id: channelId }).then((r) => r.data)
 
-export const runFix = (id: number, provider?: string) =>
-  api.post(`/issues/${id}/fix`, { provider }).then((r) => r.data)
+export const runFix = (id: number, channelId?: number | null) =>
+  api.post(`/issues/${id}/fix`, { channel_id: channelId }).then((r) => r.data)
 
 export const getSettings = () => api.get('/settings').then((r) => r.data)
 
@@ -128,7 +128,7 @@ export interface FixState {
   updated_at?: string
 }
 
-export const applyFix = (id: number, data: { provider?: string; repos?: string[]; message?: string }) =>
+export const applyFix = (id: number, data: { channel_id?: number | null; repos?: string[]; message?: string }) =>
   api.post<{ state: FixState; diffs: Record<string, any>; context: string }>(`/issues/${id}/fix/apply`, data)
     .then((r) => r.data)
 
@@ -214,3 +214,39 @@ export const mergeProjects = (target_id: number, source_id: number, name?: strin
 /** dry=true 只扫描不入库；dry=false 会把新候选项目写进库 */
 export const scanRepos = (dry = true) =>
   api.get<ScanResult>('/code/scan', { params: { dry } }).then((r) => r.data)
+
+// ---------- AI 通道 ----------
+
+export interface Channel {
+  id: number
+  name: string
+  kind: 'api' | 'agent' | 'mock'
+  base_url?: string
+  model?: string
+  command?: string
+  args?: string
+  temperature?: number
+  max_rounds?: number
+  enabled: boolean
+  hasKey: boolean
+}
+
+export const getChannels = () =>
+  api.get<{ channels: Channel[] }>('/channels').then((r) => r.data)
+
+export const createChannel = (data: Partial<Channel> & { api_key?: string }) =>
+  api.post<{ id: number }>('/channels', data).then((r) => r.data)
+
+export const updateChannel = (id: number, data: Partial<Channel> & { api_key?: string }) =>
+  api.patch(`/channels/${id}`, data).then((r) => r.data)
+
+export const deleteChannel = (id: number) =>
+  api.delete(`/channels/${id}`).then((r) => r.data)
+
+export const listChannelModels = (data: { base_url: string; api_key?: string; channel_id?: number }) =>
+  api.post<{ models: string[] }>('/channels/models', data).then((r) => r.data)
+
+export const testChannel = (id: number) =>
+  api.post<{ ok: boolean; model: string; reply: string; durationMs: number }>(
+    `/channels/${id}/test`, {}, { timeout: 180000 }
+  ).then((r) => r.data)

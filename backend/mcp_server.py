@@ -34,7 +34,7 @@ from app.config import ALL_STATUS, ATTACH_DIR, COMPLEXITIES, PRIORITIES, SEVERIT
 from app.db import add_event, connect, get_settings, init_db, list_rows, now, valid_status  # noqa: E402
 from app.prompts import (FIX_SYSTEM, QUALIFY_SYSTEM, TRIAGE_SYSTEM, build_fix_prompt,  # noqa: E402
                          build_qualify_prompt, build_triage_prompt, extract_json)
-from app.providers import AIError, run_ai  # noqa: E402
+from app.channels import AIError, run_ai  # noqa: E402
 
 mcp = FastMCP("issue-hub")
 
@@ -172,8 +172,8 @@ def add_note(issue_id: int, note: str) -> dict:
 
 
 @mcp.tool()
-def run_qualify(issue_id: int, provider: str = "") -> dict:
-    """跑 AI 定性，返回结构化草稿（不落库为最终值，需要人工确认）。provider 可空=mock。"""
+def run_qualify(issue_id: int, channel_id: int = 0) -> dict:
+    """跑 AI 定性，返回结构化草稿（不落库为最终值，需要人工确认）。channel_id 传 0 用默认通道。"""
     row = _issue(issue_id)
     if not row:
         return {"error": f"问题 #{issue_id} 不存在"}
@@ -182,7 +182,7 @@ def run_qualify(issue_id: int, provider: str = "") -> dict:
             "SELECT path FROM attachment WHERE issue_id = ?", (issue_id,)).fetchall()]
     prompt = build_qualify_prompt(row, paths)
     try:
-        result = run_ai(provider, prompt, QUALIFY_SYSTEM)
+        result = run_ai(channel_id or None, prompt, QUALIFY_SYSTEM)
         data = extract_json(result.text)
     except (AIError, ValueError) as ex:
         return {"error": str(ex)}
@@ -225,7 +225,7 @@ def confirm_qualify(issue_id: int, phenomenon: str, title: str = "",
 
 
 @mcp.tool()
-def run_triage(issue_id: int, provider: str = "") -> dict:
+def run_triage(issue_id: int, channel_id: int = 0) -> dict:
     """基于已确认描述跑 AI 定级，返回 S/复杂度/P 并写回问题（状态变「待处理」）。"""
     row = _issue(issue_id)
     if not row:
@@ -234,7 +234,7 @@ def run_triage(issue_id: int, provider: str = "") -> dict:
         return {"error": "还没确认过定性，先 confirm_qualify"}
     confirmed = json.loads(row["qualify_final"])
     try:
-        result = run_ai(provider, build_triage_prompt(confirmed), TRIAGE_SYSTEM)
+        result = run_ai(channel_id or None, build_triage_prompt(confirmed), TRIAGE_SYSTEM)
         data = extract_json(result.text)
     except (AIError, ValueError) as ex:
         return {"error": str(ex)}
@@ -253,7 +253,7 @@ def run_triage(issue_id: int, provider: str = "") -> dict:
 
 
 @mcp.tool()
-def make_fix_plan(issue_id: int, provider: str = "", code_scope: str = "") -> dict:
+def make_fix_plan(issue_id: int, channel_id: int = 0, code_scope: str = "") -> dict:
     """让 agent 在代码目录里定位根因、给修复方案（只读，不改代码）。
 
     code_scope 为空时用设置里的 repo.root；也可以临时指定一个或多个目录（逗号分隔），
@@ -278,7 +278,7 @@ def make_fix_plan(issue_id: int, provider: str = "", code_scope: str = "") -> di
     prompt = build_fix_prompt(confirmed, scopes or ([root] if root else []),
                               ignore_list(), project_notes())
     try:
-        result = run_ai(provider, prompt, FIX_SYSTEM, cwd=cwd or None)
+        result = run_ai(channel_id or None, prompt, FIX_SYSTEM, cwd=cwd or None)
         data = extract_json(result.text)
     except (AIError, ValueError) as ex:
         return {"error": str(ex)}

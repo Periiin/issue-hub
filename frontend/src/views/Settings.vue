@@ -137,114 +137,139 @@
       </div>
     </section>
 
-    <!-- 执行器 -->
+    <!-- AI 通道 -->
     <section class="panel ih-card">
       <div class="panel-head">
         <div class="panel-title">
           <span class="step-badge">AI</span>
           <div>
-            <h2>默认执行器</h2>
-            <p>定性/定级/分析/改代码都用它；单次操作可在详情页临时切换</p>
+            <h2>AI 通道</h2>
+            <p>填一个 OpenAI 兼容端点 + 模型即可；本地 claude/dsh 也能加成通道</p>
           </div>
+        </div>
+        <div class="panel-actions">
+          <el-button round @click="openCreateChannel">＋ 新建通道</el-button>
         </div>
       </div>
 
-      <div class="provider-grid">
-        <button
-          v-for="p in providers"
-          :key="p"
-          class="provider-card"
-          :class="{ 'is-on': form['ai.provider'] === p }"
-          @click="form['ai.provider'] = p"
-        >
-          <span class="provider-name">{{ label(p) }}</span>
-          <span class="provider-desc">{{ desc(p) }}</span>
-        </button>
+      <div class="ch-list">
+        <div v-for="c in channels" :key="c.id" class="ch-card" :class="{ 'is-default': defaultChannelId === c.id }">
+          <div class="ch-head">
+            <div class="ch-title">
+              <b>{{ c.name }}</b>
+              <span class="ch-kind" :class="`is-${c.kind}`">{{ kindLabel(c.kind) }}</span>
+              <span v-if="defaultChannelId === c.id" class="ch-tag">默认</span>
+              <span v-if="!c.enabled" class="ch-tag">已停用</span>
+            </div>
+            <div class="ch-actions">
+              <el-button size="small" round :loading="testingId === c.id" @click="doTest(c)">测试</el-button>
+              <el-button size="small" round @click="openEditChannel(c)">编辑</el-button>
+              <el-button size="small" round type="danger" plain @click="removeChannel(c)">删除</el-button>
+            </div>
+          </div>
+          <div class="ch-meta">
+            <template v-if="c.kind === 'api'">
+              <code>{{ c.base_url }}</code>
+              <span class="ch-model">{{ c.model || '未选模型' }}</span>
+              <span class="ch-key" :class="{ 'is-ok': c.hasKey }">{{ c.hasKey ? 'Key 已配' : '未配 Key' }}</span>
+            </template>
+            <template v-else-if="c.kind === 'agent'">
+              <code>{{ c.command }}</code>
+              <span class="ch-model">本地进程</span>
+            </template>
+            <template v-else>
+              <span class="ih-muted">假数据通道，不消耗额度</span>
+            </template>
+          </div>
+        </div>
+        <div v-if="!channels.length" class="ih-muted ch-empty">
+          还没有通道。点右上角「新建通道」填一个端点（如 <code>https://api.deepseek.com/v1</code>）。
+        </div>
       </div>
 
-      <div class="field-grid">
+      <div class="field-grid ch-globals">
         <label class="field">
           <span class="field-label">超时（秒）</span>
           <el-input v-model="form['ai.timeout']" />
         </label>
-        <label class="field field--wide">
-          <span class="field-label">代码仓库根目录</span>
-          <el-input v-model="form['repo.root']" placeholder="/src/gym-fold" />
-          <span class="field-hint">dsh / claude 在这个目录下分析代码；多个仓库时填父目录</span>
+        <label class="field">
+          <span class="field-label">默认通道</span>
+          <el-select v-model="defaultChannelId" clearable placeholder="未设置" @change="saveDefaultChannel">
+            <el-option v-for="c in channels" :key="c.id" :label="c.name" :value="c.id" />
+          </el-select>
         </label>
       </div>
     </section>
 
-    <!-- DeepSeek -->
-    <section class="panel ih-card">
-      <div class="panel-head">
-        <div class="panel-title">
-          <span class="step-badge step-badge--blue">DS</span>
-          <div>
-            <h2>DeepSeek API</h2>
-            <p>最快的定性/定级通道，看不到代码</p>
+    <!-- 通道编辑抽屉 -->
+    <el-drawer v-model="chDrawer" :title="chForm.id ? '编辑通道' : '新建通道'" :size="isMobile ? '100%' : '620px'" append-to-body>
+      <el-form label-position="top" class="ch-form">
+        <el-form-item label="名称">
+          <el-input v-model="chForm.name" placeholder="随便起，如 DeepSeek 官方 / xx 中转站" />
+        </el-form-item>
+        <el-form-item label="类型">
+          <el-radio-group v-model="chForm.kind">
+            <el-radio-button value="api">API 端点</el-radio-button>
+            <el-radio-button value="agent">本地 Agent</el-radio-button>
+            <el-radio-button value="mock">Mock</el-radio-button>
+          </el-radio-group>
+          <div class="field-hint">
+            API 端点走 OpenAI 兼容格式，程序会自动带上读写文件的工具，因此也能改代码；
+            本地 Agent 是 claude / dsh 这类自带工具的命令行。
           </div>
-        </div>
-        <el-tag v-if="form['deepseek.api_key_set']" type="success" effect="light">已配置 Key</el-tag>
-      </div>
+        </el-form-item>
 
-      <div class="field-grid">
-        <label class="field field--wide">
-          <span class="field-label">Base URL</span>
-          <el-input v-model="form['deepseek.base_url']" />
-        </label>
-        <label class="field">
-          <span class="field-label">模型</span>
-          <el-input v-model="form['deepseek.model']" placeholder="deepseek-chat" />
-        </label>
-        <label class="field field--wide">
-          <span class="field-label">API Key</span>
-          <el-input
-            v-model="form['deepseek.api_key']"
-            type="password"
-            show-password
-            :placeholder="form['deepseek.api_key_set'] ? '已配置，留空表示不修改' : 'sk-...'"
-          />
-        </label>
-      </div>
-    </section>
+        <template v-if="chForm.kind === 'api'">
+          <el-form-item label="Base URL">
+            <el-input v-model="chForm.base_url" placeholder="https://api.deepseek.com/v1" />
+            <div class="field-hint">要带版本路径（多数是 <code>/v1</code>），程序会拼 <code>/chat/completions</code></div>
+          </el-form-item>
+          <el-form-item label="API Key">
+            <el-input
+              v-model="chForm.api_key" type="password" show-password
+              :placeholder="chForm.hasKey ? '已配置，留空表示不修改' : 'sk-...'"
+            />
+          </el-form-item>
+          <el-form-item label="模型">
+            <div class="model-row">
+              <el-select
+                v-model="chForm.model" filterable allow-create default-first-option
+                placeholder="先拉取，或直接手填模型名" class="model-select"
+              >
+                <el-option v-for="m in modelOptions" :key="m" :label="m" :value="m" />
+              </el-select>
+              <el-button round :loading="loadingModels" @click="fetchModels">拉取模型</el-button>
+            </div>
+          </el-form-item>
+          <el-form-item label="温度">
+            <el-input-number v-model="chForm.temperature" :min="0" :max="2" :step="0.1" />
+          </el-form-item>
+          <el-form-item label="工具循环最大轮数">
+            <el-input-number v-model="chForm.max_rounds" :min="1" :max="100" />
+            <div class="field-hint">改代码时模型会多轮读写文件，太小会半途而废</div>
+          </el-form-item>
+        </template>
 
-    <!-- CLI -->
-    <section class="panel ih-card">
-      <div class="panel-head">
-        <div class="panel-title">
-          <span class="step-badge step-badge--gray">&gt;_</span>
-          <div>
-            <h2>命令行执行器</h2>
-            <p>同机运行，能读仓库；只做只读分析，不改文件</p>
-          </div>
-        </div>
-      </div>
+        <template v-else-if="chForm.kind === 'agent'">
+          <el-form-item label="命令">
+            <el-input v-model="chForm.command" placeholder="claude 或 /home/you/.nvm/.../bin/claude" />
+            <div class="field-hint">不在 PATH 里就填绝对路径；用 ./start.sh 启动会自动补 nvm 的 PATH</div>
+          </el-form-item>
+          <el-form-item label="额外参数（可选）">
+            <el-input v-model="chForm.args" placeholder="如 --profile headless" />
+          </el-form-item>
+        </template>
 
-      <div class="field-grid">
-        <label class="field">
-          <span class="field-label">dsh 命令</span>
-          <el-input v-model="form['dsh.bin']" placeholder="dsh" />
-        </label>
-        <label class="field">
-          <span class="field-label">dsh profile</span>
-          <el-input v-model="form['dsh.profile']" placeholder="headless" />
-        </label>
-        <label class="field">
-          <span class="field-label">claude 命令</span>
-          <el-input v-model="form['claude.bin']" placeholder="claude" />
-        </label>
-        <label class="field">
-          <span class="field-label">claude 模型</span>
-          <el-input v-model="form['claude.model']" placeholder="留空用默认" />
-        </label>
-      </div>
+        <el-form-item label="启用">
+          <el-switch v-model="chForm.enabled" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="chDrawer = false">取消</el-button>
+        <el-button type="primary" :loading="chSaving" @click="saveChannel">保存</el-button>
+      </template>
+    </el-drawer>
 
-      <p class="tip">
-        命令不在默认 PATH 时填绝对路径（如 <code>~/.nvm/versions/node/v24.16.0/bin/claude</code>）。
-        用 <code>./start.sh</code> 启动会自动补 nvm PATH。
-      </p>
-    </section>
 
     <div class="footer">
       <span class="ih-muted">定级规则版本：{{ rubricVersion }}</span>
@@ -257,16 +282,141 @@
 import { onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
-  createProject, deleteProject, getProjects, getSettings, mergeProjects,
-  saveSettings, scanRepos, updateProject, type Project, type ScanResult
+  createChannel, createProject, deleteChannel, deleteProject, getChannels, getProjects,
+  getSettings, listChannelModels, mergeProjects, saveSettings, scanRepos, testChannel,
+  updateChannel, updateProject,
+  type Channel, type Project, type ScanResult
 } from '../api'
 import { useTheme } from '../useTheme'
+import { useMobile } from '../useMobile'
 
 const { mode, setMode } = useTheme()
+const isMobile = useMobile()
 const form = reactive<Record<string, any>>({})
-const providers = ref<string[]>([])
 const rubricVersion = ref('')
 const saving = ref(false)
+
+/* ===== AI 通道 ===== */
+const channels = ref<Channel[]>([])
+const defaultChannelId = ref<number | null>(null)
+const testingId = ref(0)
+const chDrawer = ref(false)
+const chSaving = ref(false)
+const loadingModels = ref(false)
+const modelOptions = ref<string[]>([])
+const chForm = reactive<Record<string, any>>({
+  id: 0, name: '', kind: 'api', base_url: '', api_key: '', model: '',
+  command: '', args: '', temperature: 0.2, max_rounds: 25, enabled: true, hasKey: false
+})
+
+const kindLabel = (k: string) =>
+  ({ api: 'API', agent: '本地', mock: 'Mock' } as any)[k] || k
+
+const loadChannels = async () => {
+  const r = await getChannels().catch(() => null)
+  channels.value = r?.channels || []
+}
+
+const resetChForm = () => {
+  Object.assign(chForm, {
+    id: 0, name: '', kind: 'api', base_url: '', api_key: '', model: '',
+    command: '', args: '', temperature: 0.2, max_rounds: 25, enabled: true, hasKey: false
+  })
+  modelOptions.value = []
+}
+
+const openCreateChannel = () => {
+  resetChForm()
+  chDrawer.value = true
+}
+
+const openEditChannel = (c: Channel) => {
+  resetChForm()
+  Object.assign(chForm, {
+    id: c.id, name: c.name, kind: c.kind, base_url: c.base_url || '',
+    model: c.model || '', command: c.command || '', args: c.args || '',
+    temperature: c.temperature ?? 0.2, max_rounds: c.max_rounds ?? 25,
+    enabled: c.enabled, hasKey: c.hasKey
+  })
+  if (c.model) modelOptions.value = [c.model]
+  chDrawer.value = true
+}
+
+/** 拉模型列表：key 可以现填，也可以复用通道里存的（不回显明文） */
+const fetchModels = async () => {
+  if (!chForm.base_url) {
+    ElMessage.warning('先填 Base URL')
+    return
+  }
+  loadingModels.value = true
+  try {
+    const r = await listChannelModels({
+      base_url: chForm.base_url,
+      api_key: chForm.api_key || undefined,
+      channel_id: chForm.id || undefined
+    })
+    modelOptions.value = r.models
+    ElMessage.success(`拉到 ${r.models.length} 个模型`)
+    if (!chForm.model && r.models.length) chForm.model = r.models[0]
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.detail || '拉取失败，可以手填模型名')
+  } finally {
+    loadingModels.value = false
+  }
+}
+
+const saveChannel = async () => {
+  if (!chForm.name.trim()) {
+    ElMessage.warning('通道名称不能为空')
+    return
+  }
+  chSaving.value = true
+  try {
+    const payload: Record<string, any> = {
+      name: chForm.name, kind: chForm.kind, base_url: chForm.base_url,
+      model: chForm.model, command: chForm.command, args: chForm.args,
+      temperature: chForm.temperature, max_rounds: chForm.max_rounds,
+      enabled: chForm.enabled
+    }
+    if (chForm.api_key) payload.api_key = chForm.api_key
+    if (chForm.id) await updateChannel(chForm.id, payload)
+    else await createChannel(payload)
+    chDrawer.value = false
+    await loadChannels()
+    ElMessage.success('已保存')
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.detail || '保存失败')
+  } finally {
+    chSaving.value = false
+  }
+}
+
+const doTest = async (c: Channel) => {
+  testingId.value = c.id
+  try {
+    const r = await testChannel(c.id)
+    ElMessage.success(`连通正常（${r.durationMs}ms）：${r.reply || r.model}`)
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.detail || '测试失败')
+  } finally {
+    testingId.value = 0
+  }
+}
+
+const removeChannel = async (c: Channel) => {
+  await ElMessageBox.confirm(`删除通道「${c.name}」？`, '提示', { type: 'warning' })
+  await deleteChannel(c.id)
+  await loadChannels()
+  if (defaultChannelId.value === c.id) {
+    defaultChannelId.value = null
+    await saveDefaultChannel()
+  }
+  ElMessage.success('已删除')
+}
+
+const saveDefaultChannel = async () => {
+  await saveSettings({ 'ai.channel_id': defaultChannelId.value ? String(defaultChannelId.value) : '' })
+}
 
 /* ===== 项目 ===== */
 const projects = ref<(Project & { _notes?: string })[]>([])
@@ -369,20 +519,12 @@ const doMergeSuggestion = async (sg: ScanResult['suggestions'][number]) => {
   ElMessage.success(`已合并为「${sg.mergedName}」`)
 }
 
-const label = (p: string) =>
-  ({ mock: 'Mock', deepseek: 'DeepSeek API', dsh: 'dsh harness', claude: 'Claude Code' } as any)[p] || p
-const desc = (p: string) =>
-  ({
-    mock: '假数据，验证流程，不花额度',
-    deepseek: '快且便宜，只能看文字（不能改代码）',
-    dsh: '同机运行，能读仓库也能改代码',
-    claude: '同机运行，能读仓库也能改代码'
-  } as any)[p] || ''
-
 const load = async () => {
   const res = await getSettings()
   Object.assign(form, res.settings)
-  providers.value = res.providers
+  defaultChannelId.value = res.settings['ai.channel_id']
+    ? Number(res.settings['ai.channel_id'])
+    : null
   rubricVersion.value = res.rubricVersion
 }
 
@@ -405,6 +547,7 @@ const save = async (silent = false) => {
 onMounted(async () => {
   await load()
   await loadProjects()
+  await loadChannels()
 })
 </script>
 
@@ -489,6 +632,38 @@ onMounted(async () => {
 .proj-repos code { font-size: 11.5px; color: var(--ih-sub); word-break: break-all; }
 .proj-notes { margin-top: 2px; }
 .proj-empty { padding: 12px 0; }
+
+/* ---------- AI 通道 ---------- */
+.ch-list { display: flex; flex-direction: column; gap: 10px; }
+.ch-card {
+  border: 1px solid var(--ih-line); border-radius: 12px; padding: 12px;
+  background: var(--ih-soft); display: flex; flex-direction: column; gap: 8px;
+}
+.ch-card.is-default { border-color: var(--el-color-primary); background: var(--el-color-primary-light-9); }
+.ch-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
+.ch-title { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.ch-title b { font-size: 14px; color: var(--ih-ink); }
+.ch-kind {
+  font-size: 11px; padding: 1px 7px; border-radius: 999px;
+  background: var(--ih-soft-2); color: var(--ih-sub);
+}
+.ch-kind.is-api { background: rgba(46, 144, 250, 0.14); color: #1570ef; }
+.ch-kind.is-agent { background: rgba(124, 58, 237, 0.14); color: #7c3aed; }
+.ch-tag {
+  font-size: 11px; padding: 1px 7px; border-radius: 999px;
+  background: var(--ih-primary-soft); color: var(--el-color-primary);
+}
+.ch-actions { display: flex; gap: 6px; }
+.ch-meta { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 11.5px; }
+.ch-meta code { color: var(--ih-sub); word-break: break-all; }
+.ch-model { color: var(--ih-ink); font-weight: 500; }
+.ch-key { padding: 1px 7px; border-radius: 999px; background: rgba(240, 68, 56, 0.12); color: #f04438; }
+.ch-key.is-ok { background: var(--ih-success-soft); color: var(--ih-success-ink); }
+.ch-empty { padding: 14px 0; }
+.ch-globals { margin-top: 14px; }
+.ch-form :deep(.el-form-item) { margin-bottom: 14px; }
+.model-row { display: flex; gap: 8px; width: 100%; }
+.model-select { flex: 1; }
 
 .footer { display: flex; justify-content: space-between; align-items: center; padding: 4px 2px 10px; }
 

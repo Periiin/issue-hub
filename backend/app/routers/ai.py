@@ -14,7 +14,7 @@ from ..fix import ignore_list, project_notes
 from ..prompts import (QUALIFY_SYSTEM, FIX_SYSTEM, TRIAGE_SYSTEM, build_fix_prompt,
                        build_qualify_prompt, build_triage_prompt, extract_json)
 from ..schemas import AIRequest, FixRequest, QualifyConfirm
-from ..providers import AIError, run_ai
+from ..channels import AIError, run_ai
 
 router = APIRouter(prefix="/api/issues", tags=["ai"])
 
@@ -72,7 +72,7 @@ def qualify(issue_id: int, payload: AIRequest):
     paths = [str(ATTACH_DIR / p) for p in attachments]
     prompt = build_qualify_prompt(issue, paths)
     try:
-        result = run_ai(payload.provider or "", prompt, QUALIFY_SYSTEM)
+        result = run_ai(payload.channel_id, prompt, QUALIFY_SYSTEM)
         data = extract_json(result.text)
     except (AIError, ValueError) as ex:
         with connect() as conn:
@@ -84,7 +84,8 @@ def qualify(issue_id: int, payload: AIRequest):
                      (json.dumps(data, ensure_ascii=False), RUBRIC_VERSION, now(), issue_id))
         add_event(conn, issue_id, "qualify", note=f"AI 定性（{result.provider}）")
     return {"draft": data, "provider": result.provider, "model": result.model,
-            "durationMs": result.duration_ms}
+            "durationMs": result.duration_ms, "rounds": result.rounds,
+            "toolCalls": result.tool_calls}
 
 
 @router.post("/{issue_id}/qualify/confirm")
@@ -118,7 +119,7 @@ def triage(issue_id: int, payload: AIRequest):
     confirmed = json.loads(issue["qualify_final"])
     prompt = build_triage_prompt(confirmed)
     try:
-        result = run_ai(payload.provider or "", prompt, TRIAGE_SYSTEM)
+        result = run_ai(payload.channel_id, prompt, TRIAGE_SYSTEM)
         data = extract_json(result.text)
     except (AIError, ValueError) as ex:
         with connect() as conn:
@@ -152,12 +153,18 @@ def make_fix_plan(issue_id: int, payload: FixRequest):
     if not issue.get("qualify_final"):
         raise HTTPException(400, "还没有确认过的问题描述，先完成定性")
     confirmed = json.loads(issue["qualify_final"])
-    scopes = _json_list(issue.get("code_scopes")) or [(get_settings().get("repo.root") or "").strip()]
+    # 代码范围优先级：issue 自己勾的 → 所属项目的仓库 → 全局 repo.root（兜底）
+    scopes = _json_list(issue.get("code_scopes"))
+    if not scopes and issue.get("project_id"):
+        from .. import projects as proj
+        scopes = (proj.get_project(issue["project_id"]) or {}).get("repos") or []
+    if not scopes:
+        scopes = [(get_settings().get("repo.root") or "").strip()]
     scopes = [s for s in scopes if s]
     cwd = _common_cwd(scopes)
     prompt = build_fix_prompt(confirmed, scopes, ignore_list(), project_notes())
     try:
-        result = run_ai(payload.provider or "", prompt, FIX_SYSTEM, cwd=cwd)
+        result = run_ai(payload.channel_id, prompt, FIX_SYSTEM, cwd=cwd)
         data = extract_json(result.text)
     except (AIError, ValueError) as ex:
         with connect() as conn:

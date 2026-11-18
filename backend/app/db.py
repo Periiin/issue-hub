@@ -91,6 +91,26 @@ CREATE TABLE IF NOT EXISTS project (
     updated_at  TEXT NOT NULL
 );
 
+-- AI 通道：一个可用的模型入口。两种类型：
+--   api   —— OpenAI 兼容端点（官方/中转站都行），带工具循环后能读写文件
+--   agent —— 本地 CLI agent（claude / dsh），自带文件工具
+CREATE TABLE IF NOT EXISTS channel (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT NOT NULL,
+    kind        TEXT NOT NULL DEFAULT 'api',   -- api / agent / mock
+    base_url    TEXT,
+    api_key     TEXT,
+    model       TEXT,
+    command     TEXT,                          -- agent 类型：可执行命令
+    args        TEXT,                          -- agent 类型：额外参数（空格分隔）
+    temperature REAL NOT NULL DEFAULT 0.2,
+    max_rounds  INTEGER NOT NULL DEFAULT 25,   -- 工具循环最大轮数
+    enabled     INTEGER NOT NULL DEFAULT 1,
+    sort        INTEGER NOT NULL DEFAULT 0,
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS event (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     issue_id    INTEGER NOT NULL,
