@@ -446,7 +446,8 @@ def reject_fix(issue_id: int, repo: str = "") -> dict:
 @mcp.tool()
 def get_fix_attempts(issue_id: int) -> dict:
     """查看某个 issue 的修改轮次：每轮与方案的出入、过程中发现的问题、实际根因、文件改动与风险。"""
-    from app.routers.fix import list_attempts
+    # 注意从 app.fix 导入：app.routers.fix 会带进 fastapi，MCP venv 里没有
+    from app.fix import list_attempts
     row = _issue(issue_id)
     if not row:
         return {"error": f"问题 #{issue_id} 不存在"}
