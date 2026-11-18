@@ -77,37 +77,67 @@
         </div>
       </div>
 
-      <!-- 已有项目 -->
+      <!-- 已有项目：紧凑列表，点行展开看完整路径与说明 -->
+      <div class="proj-toolbar">
+        <span class="field-label">已有项目</span>
+        <span class="ih-muted">{{ projects.length }} 个 · 点名称展开详情</span>
+        <el-input
+          v-model="projFilter" size="small" clearable placeholder="筛选项目"
+          class="proj-filter"
+        >
+          <template #prefix><span class="proj-filter-icon">⌕</span></template>
+        </el-input>
+      </div>
+
       <div class="proj-list">
-        <div v-for="p in projects" :key="p.id" class="proj-card" :class="{ 'is-ignored': p.ignored }">
-          <div class="proj-head">
-            <div class="proj-title">
+        <div
+          v-for="p in filteredProjects" :key="p.id"
+          class="proj-row" :class="{ 'is-ignored': p.ignored, 'is-open': openProjIds.includes(p.id) }"
+        >
+          <!-- 折叠态：一行 -->
+          <div class="proj-row-main" @click="toggleProjOpen(p.id)">
+            <span class="proj-caret" />
+            <div class="proj-row-name">
               <el-input
                 v-if="editingId === p.id" v-model="editName" size="small" class="proj-name-input"
-                @keyup.enter="saveName(p)" @blur="saveName(p)"
+                @keyup.enter="saveName(p)" @blur="saveName(p)" @click.stop
               />
-              <b v-else class="proj-name" @click="startEdit(p)">{{ p.name }}</b>
-              <span class="proj-count">{{ p.repos.length }} 个仓库</span>
+              <b v-else class="proj-name" @click.stop="startEdit(p)">{{ p.name }}</b>
+              <span class="proj-count">{{ p.repos.length }}</span>
               <span v-if="p.ignored" class="proj-tag">已忽略</span>
             </div>
-            <div class="proj-actions">
+            <div class="proj-row-repos">
+              <code v-for="r in p.repos.slice(0, 4)" :key="r" class="proj-repo-chip">{{ repoName(r) }}</code>
+              <span v-if="p.repos.length > 4" class="proj-repo-more">+{{ p.repos.length - 4 }}</span>
+            </div>
+            <div class="proj-row-actions" @click.stop>
               <el-button size="small" round @click="toggleIgnore(p)">
                 {{ p.ignored ? '恢复' : '忽略' }}
               </el-button>
               <el-button size="small" round type="danger" plain @click="removeProject(p)">删除</el-button>
             </div>
           </div>
-          <div class="proj-repos">
-            <code v-for="r in p.repos" :key="r">{{ r }}</code>
+
+          <!-- 展开态：完整路径 + 说明 -->
+          <div v-if="openProjIds.includes(p.id)" class="proj-row-detail">
+            <div class="proj-detail-block">
+              <span class="proj-detail-label">仓库路径</span>
+              <div class="proj-detail-paths">
+                <code v-for="r in p.repos" :key="r">{{ r }}</code>
+              </div>
+            </div>
+            <div class="proj-detail-block">
+              <span class="proj-detail-label">给 AI 的说明</span>
+              <el-input
+                v-model="p._notes" size="small"
+                placeholder="可选，如：后端 Spring Boot，前端 Vue3；会拼进提示词"
+                @blur="saveNotes(p)"
+              />
+            </div>
           </div>
-          <el-input
-            v-model="p._notes" size="small" class="proj-notes"
-            placeholder="给 AI 的项目说明（可选），如：后端用 Spring Boot，前端 Vue3"
-            @blur="saveNotes(p)"
-          />
         </div>
-        <div v-if="!projects.length" class="ih-muted proj-empty">
-          还没有项目。填好扫描根后点「扫描仓库」。
+        <div v-if="!filteredProjects.length" class="ih-muted proj-empty">
+          {{ projects.length ? '没有匹配的项目' : '还没有项目。填好扫描根后点「扫描仓库」。' }}
         </div>
       </div>
     </section>
@@ -279,7 +309,7 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   createChannel, createProject, deleteChannel, deleteProject, getChannels, getProjects,
@@ -425,6 +455,27 @@ const scanning = ref(false)
 const importing = ref(false)
 const editingId = ref<number | null>(null)
 const editName = ref('')
+/** 展开的项目 id：默认全收起，只有点开才显示完整路径与说明 */
+const openProjIds = ref<number[]>([])
+const projFilter = ref('')
+
+const toggleProjOpen = (id: number) => {
+  openProjIds.value = openProjIds.value.includes(id)
+    ? openProjIds.value.filter((x) => x !== id)
+    : [...openProjIds.value, id]
+}
+
+/** 折叠态只显示仓库目录名，完整路径在展开后看 */
+const repoName = (path: string) => path.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || path
+
+const filteredProjects = computed(() => {
+  const kw = projFilter.value.trim().toLowerCase()
+  if (!kw) return projects.value
+  return projects.value.filter(
+    (p) => p.name.toLowerCase().includes(kw)
+      || p.repos.some((r) => r.toLowerCase().includes(kw))
+  )
+})
 
 const loadProjects = async () => {
   const r = await getProjects().catch(() => null)
@@ -595,12 +646,10 @@ onMounted(async () => {
 .tip { margin: 14px 0 0; font-size: 12px; color: var(--ih-sub); line-height: 1.7; }
 .tip code { background: var(--ih-soft-2); padding: 1px 6px; border-radius: 6px; color: var(--ih-ink); }
 
-/* ---------- 项目 ---------- */
+/* ---------- 项目（紧凑列表） ---------- */
 .scan-result { display: flex; flex-direction: column; gap: 10px; margin: 12px 0; }
 .scan-line { font-size: 12.5px; color: var(--ih-sub); display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-.scan-line code {
-  background: var(--ih-soft-2); padding: 1px 7px; border-radius: 5px; font-size: 11.5px;
-}
+.scan-line code { background: var(--ih-soft-2); padding: 1px 7px; border-radius: 5px; font-size: 11.5px; }
 .scan-line b { color: var(--ih-ink); }
 .suggest-box {
   display: flex; flex-direction: column; gap: 8px;
@@ -611,68 +660,90 @@ onMounted(async () => {
   display: flex; justify-content: space-between; align-items: center;
   gap: 10px; flex-wrap: wrap; font-size: 12.5px; color: var(--ih-warn-ink);
 }
-.proj-list { display: flex; flex-direction: column; gap: 10px; margin-top: 14px; }
-.proj-card {
-  border: 1px solid var(--ih-line); border-radius: 12px; padding: 12px;
-  display: flex; flex-direction: column; gap: 8px; background: var(--ih-soft);
+
+.proj-toolbar {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin: 16px 0 8px;
 }
-.proj-card.is-ignored { opacity: 0.55; }
-.proj-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
-.proj-title { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.proj-name { font-size: 14px; color: var(--ih-ink); cursor: pointer; }
+.proj-filter { width: 160px; margin-left: auto; }
+.proj-filter-icon { color: var(--ih-sub); font-size: 13px; }
+
+.proj-list {
+  display: flex; flex-direction: column;
+  border: 1px solid var(--ih-line); border-radius: 12px; overflow: hidden;
+  background: var(--ih-card);
+}
+/* 每行只有 1 行高，比原来一张卡 100~150px 省一个数量级 */
+.proj-row { border-bottom: 1px solid var(--ih-line); }
+.proj-row:last-child { border-bottom: none; }
+.proj-row.is-ignored { opacity: 0.55; }
+.proj-row.is-open { background: var(--ih-soft); }
+
+.proj-row-main {
+  display: flex; align-items: center; gap: 12px;
+  padding: 9px 12px; cursor: pointer; transition: background-color 0.14s ease;
+}
+.proj-row-main:hover { background: var(--ih-soft); }
+.proj-row.is-open .proj-row-main:hover { background: transparent; }
+
+/* 展开箭头：用边框拼，open 时转 90° */
+.proj-caret {
+  flex: 0 0 auto; width: 7px; height: 7px;
+  border-right: 2px solid var(--ih-sub); border-bottom: 2px solid var(--ih-sub);
+  transform: rotate(-45deg); transition: transform 0.16s ease;
+}
+.proj-row.is-open .proj-caret { transform: rotate(45deg); }
+
+.proj-row-name { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; min-width: 0; }
+.proj-name { font-size: 13.5px; color: var(--ih-ink); cursor: text; }
 .proj-name:hover { color: var(--el-color-primary); }
-.proj-name-input { width: 180px; }
-.proj-count { font-size: 11.5px; color: var(--ih-sub); }
+.proj-name-input { width: 160px; }
+.proj-count {
+  font-size: 11px; padding: 0 6px; border-radius: 999px;
+  background: var(--ih-soft-2); color: var(--ih-sub);
+}
 .proj-tag {
   font-size: 11px; padding: 1px 7px; border-radius: 999px;
   background: var(--ih-soft-2); color: var(--ih-sub);
 }
-.proj-actions { display: flex; gap: 6px; }
-.proj-repos { display: flex; flex-direction: column; gap: 2px; }
-.proj-repos code { font-size: 11.5px; color: var(--ih-sub); word-break: break-all; }
-.proj-notes { margin-top: 2px; }
-.proj-empty { padding: 12px 0; }
 
-/* ---------- AI 通道 ---------- */
-.ch-list { display: flex; flex-direction: column; gap: 10px; }
-.ch-card {
-  border: 1px solid var(--ih-line); border-radius: 12px; padding: 12px;
-  background: var(--ih-soft); display: flex; flex-direction: column; gap: 8px;
-}
-.ch-card.is-default { border-color: var(--el-color-primary); background: var(--el-color-primary-light-9); }
-.ch-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
-.ch-title { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.ch-title b { font-size: 14px; color: var(--ih-ink); }
-.ch-kind {
-  font-size: 11px; padding: 1px 7px; border-radius: 999px;
+/* 仓库目录名小标签：折叠态只给名字，不给全路径 */
+.proj-row-repos { display: flex; align-items: center; gap: 6px; flex: 1 1 auto; min-width: 0; overflow: hidden; }
+.proj-repo-chip {
+  flex: 0 0 auto; font-size: 11px; padding: 1px 7px; border-radius: 6px;
   background: var(--ih-soft-2); color: var(--ih-sub);
+  max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.ch-kind.is-api { background: rgba(46, 144, 250, 0.14); color: #1570ef; }
-.ch-kind.is-agent { background: rgba(124, 58, 237, 0.14); color: #7c3aed; }
-.ch-tag {
-  font-size: 11px; padding: 1px 7px; border-radius: 999px;
-  background: var(--ih-primary-soft); color: var(--el-color-primary);
+.proj-repo-more { flex: 0 0 auto; font-size: 11px; color: var(--ih-sub); }
+.proj-row-actions { display: flex; gap: 6px; flex: 0 0 auto; }
+
+.proj-row-detail {
+  display: flex; flex-direction: column; gap: 10px;
+  padding: 0 12px 14px 31px;
 }
-.ch-actions { display: flex; gap: 6px; }
-.ch-meta { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 11.5px; }
-.ch-meta code { color: var(--ih-sub); word-break: break-all; }
-.ch-model { color: var(--ih-ink); font-weight: 500; }
-.ch-key { padding: 1px 7px; border-radius: 999px; background: rgba(240, 68, 56, 0.12); color: #f04438; }
-.ch-key.is-ok { background: var(--ih-success-soft); color: var(--ih-success-ink); }
-.ch-empty { padding: 14px 0; }
-.ch-globals { margin-top: 14px; }
-.ch-form :deep(.el-form-item) { margin-bottom: 14px; }
-.model-row { display: flex; gap: 8px; width: 100%; }
-.model-select { flex: 1; }
+.proj-detail-block { display: flex; flex-direction: column; gap: 4px; }
+.proj-detail-label { font-size: 11.5px; color: var(--ih-sub); }
+.proj-detail-paths { display: flex; flex-direction: column; gap: 2px; }
+.proj-detail-paths code { font-size: 11.5px; color: var(--ih-ink); word-break: break-all; }
+.proj-empty { padding: 16px 12px; }
 
 .footer { display: flex; justify-content: space-between; align-items: center; padding: 4px 2px 10px; }
 
 @media (max-width: 768px) {
   .page-head .el-button { display: none; }
   .panel { padding: 14px; }
-  .provider-grid { grid-template-columns: 1fr 1fr; }
   .field-grid { grid-template-columns: 1fr; }
   .field--wide { grid-column: span 1; }
   .footer { position: sticky; bottom: calc(64px + env(safe-area-inset-bottom)); }
+
+  /* 项目行：手机上横向放不下「名称+标签+两按钮」，改成两行 */
+  .proj-toolbar { gap: 8px; }
+  .proj-filter { width: 100%; margin-left: 0; }
+  .proj-row-main { flex-wrap: wrap; gap: 6px; padding: 10px 12px; }
+  .proj-row-name { flex: 1 1 auto; }
+  .proj-row-actions { margin-left: auto; }
+  .proj-row-repos { flex: 1 1 100%; padding-left: 15px; }
+  .proj-repo-chip { max-width: 140px; }
+  .proj-row-detail { padding-left: 27px; }
 }
 </style>
