@@ -79,22 +79,48 @@ cd /src/issue-hub/backend
 .venv-mcp/bin/python /tmp/mcp_client_test.py    # 需要一个用官方 SDK 写的客户端脚本
 ```
 
-## 代码范围（分析 vs 修改）
+## 项目（Project）
 
-分析只读，允许跨项目；修改必须落到具体 git 仓库：
+一个项目 = 一组**各自独立**的 git 仓库。现实里「一个系统」经常是多个仓库
+（gym = java + vue + 两个 uniapp），而且它们不一定在同一个父目录下
+（`mes-java-2` 和 `mes-vue-2.0` 就在 `/src` 同级）。
 
-| 阶段 | 选择方式 | 原因 |
-|---|---|---|
-| 分析（生成修复方案） | **多选目录**，可以直接选 `/src/gym-fold` 这种父目录 | agent 用 grep/read 全目录搜索，不依赖 git |
-| 改代码（worktree + diff） | **单选一个 git 仓库** | worktree / branch / merge 都是仓库级操作 |
+```
+project(id, name, repos[json], notes, ignored)
+issue.project_id  →  归属项目
+```
 
-字段：`issue.code_scopes`（JSON 数组）+ `issue.target_repo`（字符串），详情页「操作解决」里选择并自动保存。
+选定项目后：
+- **代码范围**（分析搜索哪些目录）= 项目里的仓库
+- **可改仓库**（worktree 在哪些仓库建）= 项目里的仓库，可在详情页临时取消某个
 
-设置项：
+仓库仍然是独立仓库：worktree / branch / merge 都在单个仓库里做，项目只是集合。
 
-- `code.roots`：候选目录，一行一个（详情页多选来源）
-- `code.ignore`：搜索跳过的目录名（默认 node_modules/target/dist/...）
-- `code.project_notes`：项目说明，拼进提示词让 AI 知道每个目录是什么
+### 配置：扫描根代替手填目录
+
+设置页只配「扫描根」（一行一个，如 `/src`、`E:/project`），
+后端自动往下 3 层找 git 仓库并聚成候选项目：
+
+| 情况 | 聚类结果 |
+|---|---|
+| 扫描根的**直接子仓库** | 各自独立项目（bom-editor / gym-uniapp / issue-hub …） |
+| 扫描根**子目录里的仓库** | 按子目录聚成一个项目（gym-fold 4 个 / asano-mes 2 个） |
+| 名字前缀相近但不同父目录 | **只给合并建议，不自动合并**（mes-java-2 + mes-vue-2.0 → 建议合成 mes） |
+
+换机器只改扫描根，不用重新维护一堆目录。
+
+### 接口
+
+```
+GET   /api/code/scan?dry=true     扫描预览（不入库）
+GET   /api/code/scan?dry=false    扫描并导入新候选项目（已存在的跳过）
+GET   /api/projects               项目列表（含 ignored）
+POST  /api/projects               新建 {name, repos[], notes}
+PATCH /api/projects/{id}          改名 / 改仓库 / 说明 / ignored
+DELETE /api/projects/{id}         删除（关联 issue 的 project_id 置空，不删 issue）
+POST  /api/projects/merge         合并 {target_id, source_id, name}
+GET   /api/code/roots?project_id= 候选仓库（传 project_id 只返回该项目）
+```
 
 ## 操作解决闭环
 

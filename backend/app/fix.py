@@ -215,23 +215,35 @@ def next_attempt_seq(issue_id: int) -> int:
 # ---------------- 代码范围 ----------------
 
 def list_code_roots() -> list[dict]:
-    """设置里配置的候选目录 + 是否 git 仓库 / 是否存在。"""
-    raw = get_settings().get("code.roots") or ""
+    """候选代码目录 = 所有项目里的仓库（+ 扫描发现的仓库兜底）。
+
+    以前是手填 code.roots，现在改成按「项目」聚合：
+    项目才是稳定的组合（gym = 4 个仓库），目录只是它的成员。
+    """
+    from . import projects as proj
+    paths: list[str] = []
+    for project in proj.list_projects():
+        paths.extend(project.get("repos") or [])
+    if not paths:
+        # 还没建项目：用扫描结果兜底，保证页面不为空
+        paths = [r["path"] for r in proj.discover_repos()]
     result = []
-    for line in raw.splitlines():
-        path = line.strip()
-        if not path:
+    seen = set()
+    for raw in dict.fromkeys(paths):
+        p = Path(raw).expanduser()
+        key = str(p.resolve()).lower() if p.exists() else str(p).lower()
+        if key in seen:
             continue
-        p = Path(path).expanduser()
-        root = repo_root(str(p))
+        seen.add(key)
+        is_git = is_repo_root(str(p))
         result.append({
             "path": str(p),
             "name": p.name,
             "exists": p.is_dir(),
-            "isGit": bool(root) and Path(root).resolve() == p.resolve(),
-            "repoRoot": root,
+            "isGit": is_git,
+            "repoRoot": str(p) if is_git else repo_root(str(p)),
         })
-    return result
+    return sorted(result, key=lambda x: (not x["exists"], x["name"].lower()))
 
 
 def ignore_list() -> list[str]:
@@ -240,30 +252,14 @@ def ignore_list() -> list[str]:
 
 
 def list_target_repos() -> list[dict]:
-    """可作为「改代码」目标的 git 仓库根（去重）。
+    """可作为「改代码」目标的 git 仓库根。
 
-    和 list_code_roots 的区别：代码范围可能是某个大仓库下的子目录
-    （如 gym-fold/gym-vue-1），这些子目录不是仓库根，不能做 worktree；
-    但它们的 repoRoot 是。这里按 repoRoot 归并，并记录每个仓库
-    覆盖了哪些已配置的代码目录，前端据此提示「范围与目标仓库不匹配」。
+    现在项目里的每个仓库本身就是仓库根，不再需要 covers 归并；
+    保留 covers 字段（空数组）只是为了前端不用改结构。
     """
-    roots = list_code_roots()
-    by_repo: dict[str, dict] = {}
-    for r in roots:
-        root = r.get("repoRoot")
-        if not root:
-            continue
-        entry = by_repo.setdefault(root, {
-            "path": root,
-            "name": Path(root).name,
-            "exists": Path(root).is_dir(),
-            "isGit": True,
-            "covers": [],
-        })
-        # 子目录归到 covers；仓库根本身不算「覆盖的子项目」
-        if Path(r["path"]).resolve() != Path(root).resolve():
-            entry["covers"].append(r["path"])
-    return sorted(by_repo.values(), key=lambda x: (not x["exists"], x["name"].lower()))
+    return [{"path": r["path"], "name": r["name"], "exists": r["exists"],
+             "isGit": True, "covers": []}
+            for r in list_code_roots() if r["isGit"] and r["exists"]]
 
 
 def project_notes() -> str:

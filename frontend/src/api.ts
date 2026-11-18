@@ -17,6 +17,8 @@ export interface Issue {
   complexity: string | null
   priority: string | null
   fix_plan: any
+  /** 所属项目（决定默认代码范围与可改仓库） */
+  project_id?: number | null
   created_at: string
   updated_at: string
 }
@@ -93,9 +95,10 @@ export interface TargetRepo {
   covers: string[]
 }
 
-export const getCodeRoots = () =>
-  api.get<{ roots: CodeRoot[]; ignore: string[]; projectNotes: string; targetRepos: TargetRepo[] }>('/code/roots')
-    .then((r) => r.data)
+export const getCodeRoots = (projectId?: number | null) =>
+  api.get<{ roots: CodeRoot[]; ignore: string[]; projectNotes: string; targetRepos: TargetRepo[] }>(
+    '/code/roots', { params: projectId ? { project_id: projectId } : {} }
+  ).then((r) => r.data)
 
 /** 单个仓库的 worktree 状态（多仓库时 fix_state.repos 的每个值） */
 export interface RepoFixState {
@@ -166,3 +169,48 @@ export interface FixAttempt {
   repos?: Record<string, { status?: string; error?: string; summary?: string; files?: string[]; deviations?: string[]; found_issues?: string[] }>
   created_at?: string
 }
+
+// ---------- 项目 ----------
+
+export interface Project {
+  id: number
+  name: string
+  repos: string[]
+  notes?: string
+  ignored?: boolean
+}
+
+export interface ScanResult {
+  roots: string[]
+  scanned: number
+  repos: { path: string; name: string; parent: string; root: string; depth: number }[]
+  clusters: { key: string; name: string; repos: string[]; depth: number }[]
+  created: { id: number; name: string; repos: string[] }[]
+  suggestions: {
+    reason: string
+    projects: { name: string; key: string; repos: string[] }[]
+    mergedName: string
+    mergedRepos: string[]
+  }[]
+  projects: Project[]
+  hint?: string
+}
+
+export const getProjects = () =>
+  api.get<{ projects: Project[] }>('/projects').then((r) => r.data)
+
+export const createProject = (data: { name: string; repos: string[]; notes?: string }) =>
+  api.post<{ id: number; project: Project }>('/projects', data).then((r) => r.data)
+
+export const updateProject = (id: number, data: Partial<Project>) =>
+  api.patch<{ project: Project }>(`/projects/${id}`, data).then((r) => r.data)
+
+export const deleteProject = (id: number) =>
+  api.delete(`/projects/${id}`).then((r) => r.data)
+
+export const mergeProjects = (target_id: number, source_id: number, name?: string) =>
+  api.post<{ project: Project }>('/projects/merge', { target_id, source_id, name }).then((r) => r.data)
+
+/** dry=true 只扫描不入库；dry=false 会把新候选项目写进库 */
+export const scanRepos = (dry = true) =>
+  api.get<ScanResult>('/code/scan', { params: { dry } }).then((r) => r.data)

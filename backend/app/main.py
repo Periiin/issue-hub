@@ -13,7 +13,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .config import ATTACH_DIR, FRONTEND_DIST
 from .db import init_db
-from .routers import ai, fix, issues, report, settings
+from .routers import ai, fix, issues, projects, report, settings
 
 app = FastAPI(title="Issue Hub", version="0.1.0")
 
@@ -27,6 +27,7 @@ app.add_middleware(
 app.include_router(issues.router)
 app.include_router(ai.router)
 app.include_router(fix.router)
+app.include_router(projects.router)
 app.include_router(report.router)
 app.include_router(settings.router)
 

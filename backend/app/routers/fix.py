@@ -18,6 +18,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException
 
 from .. import context as ctx
+from .. import projects
 from ..db import add_event, connect, get_settings, now
 from ..fix import (FixError, collect_diff, commit_all, create_worktree, current_branch,
                    drop_all_worktrees, drop_worktree, ignore_list, is_repo_root,
@@ -61,13 +62,21 @@ def _record_run(conn, issue_id: int, kind: str, result, ok: bool, error: str | N
 # ---------------- 目标仓库 ----------------
 
 def _issue_repos(issue: dict) -> list[str]:
-    """读 issue 的目标仓库列表，兼容旧的单值 target_repo。
+    """读 issue 的目标仓库列表。优先级：
 
-    去重时按归一化路径比较：同一个仓库可能因分隔符不同被存成两份。
+    1. issue.target_repos（用户在详情页调整过的）
+    2. issue.target_repo（旧的单值字段）
+    3. 所属项目 project.repos（选了项目就默认整项目）
+
+    去重按归一化路径：同一个仓库可能因分隔符不同被存成两份。
     """
     repos = _json(issue.get("target_repos")) or []
     if not repos and issue.get("target_repo"):
         repos = [issue["target_repo"]]
+    if not repos and issue.get("project_id"):
+        project = projects.get_project(issue["project_id"])
+        if project:
+            repos = project.get("repos") or []
     seen, out = set(), []
     for r in repos:
         if not r:
@@ -78,6 +87,18 @@ def _issue_repos(issue: dict) -> list[str]:
         seen.add(key)
         out.append(r)
     return out
+
+
+def _issue_scopes(issue: dict) -> list[str]:
+    """分析用代码目录。issue 自己勾过就用它的，否则用所属项目的仓库集合。"""
+    scopes = _json(issue.get("code_scopes")) or []
+    if scopes:
+        return scopes
+    if issue.get("project_id"):
+        project = projects.get_project(issue["project_id"])
+        if project:
+            return project.get("repos") or []
+    return []
 
 
 def _repo_info(path: str) -> dict:
@@ -107,10 +128,28 @@ def _norm_state(issue: dict) -> dict:
 # ---------------- 代码范围 / 上下文文件 ----------------
 
 @router.get("/code/roots")
-def code_roots():
-    """代码范围候选 + 去重后的目标仓库 + 忽略规则 + 项目说明。"""
-    return {"roots": list_code_roots(), "ignore": ignore_list(),
-            "projectNotes": project_notes(), "targetRepos": list_target_repos()}
+def code_roots(project_id: int | None = None):
+    """代码范围候选 + 目标仓库 + 忽略规则 + 项目说明。
+
+    传 project_id 时只返回该项目里的仓库（详情页右栏用），
+    不传则返回所有项目的仓库（设置页/兜底用）。
+    """
+    if project_id:
+        project = projects.get_project(project_id)
+        roots = []
+        for path in (project or {}).get("repos") or []:
+            p = Path(path)
+            ok = is_repo_root(str(p))
+            roots.append({"path": str(p), "name": p.name, "exists": p.is_dir(),
+                          "isGit": ok, "repoRoot": str(p) if ok else None})
+        notes = ((project or {}).get("notes") or "").strip()
+        combined = "\n".join(x for x in (project_notes(), notes) if x).strip()
+    else:
+        roots = list_code_roots()
+        combined = project_notes()
+    return {"roots": roots, "ignore": ignore_list(),
+            "projectNotes": combined,
+            "targetRepos": [r for r in roots if r["isGit"] and r["exists"]]}
 
 
 @router.get("/issues/{issue_id}/context")
@@ -176,7 +215,7 @@ def apply_fix(issue_id: int, payload: FixApplyReq):
         raise HTTPException(
             400, f"当前执行器 {provider or '未配置'} 不能改代码；请切到 claude 或 dsh（它们能在工作目录里编辑文件）")
 
-    scopes = _json(issue.get("code_scopes")) or []
+    scopes = _issue_scopes(issue)
     plan = _json(issue.get("fix_plan"))
 
     # 生成/刷新上下文文件（用户手写区保留），并取出边界正文

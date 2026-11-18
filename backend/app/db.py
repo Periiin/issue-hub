@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS issue (
     target_repo     TEXT,                        -- 旧字段：单个 git 仓库（保留兼容）
     target_repos    TEXT,                        -- JSON 数组：改代码用的 git 仓库（可多个）
     fix_state       TEXT,                        -- JSON：按仓库分组的 worktree/branch/diff 状态
+    project_id      INTEGER,                     -- 所属项目（project 表），决定默认代码范围与仓库
     created_at      TEXT NOT NULL,
     updated_at      TEXT NOT NULL
 );
@@ -76,6 +77,20 @@ CREATE TABLE IF NOT EXISTS fix_attempt (
 );
 CREATE INDEX IF NOT EXISTS idx_fix_attempt_issue ON fix_attempt(issue_id);
 
+-- 项目：一组协作开发的仓库（如 gym = java + vue + 两个小程序）。
+-- 仓库天然是"一个项目多个 git 仓库"，所以这里是 1:N。
+-- ignored=1 表示用户明确不想跟踪（扫描会跳过），保留是为了别每次扫描又冒出来。
+CREATE TABLE IF NOT EXISTS project (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT NOT NULL,
+    repos       TEXT,                  -- JSON 数组：仓库绝对路径（各自是独立 git 仓库）
+    notes       TEXT,                  -- 给 AI 看的项目说明（可选，会拼进提示词）
+    ignored     INTEGER NOT NULL DEFAULT 0,
+    sort        INTEGER NOT NULL DEFAULT 0,
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS event (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     issue_id    INTEGER NOT NULL,
@@ -120,6 +135,7 @@ def init_db() -> None:
             ("target_repo", "ALTER TABLE issue ADD COLUMN target_repo TEXT"),
             ("target_repos", "ALTER TABLE issue ADD COLUMN target_repos TEXT"),
             ("fix_state", "ALTER TABLE issue ADD COLUMN fix_state TEXT"),
+            ("project_id", "ALTER TABLE issue ADD COLUMN project_id INTEGER"),
         ):
             if column not in existing:
                 conn.execute(ddl)

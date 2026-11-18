@@ -92,8 +92,13 @@ def get_issue(issue_id: int):
     if not issue.get("target_repos") and issue.get("target_repo"):
         issue["target_repos"] = [issue["target_repo"]]
     from ..fix import list_attempts
-    return {"issue": issue, "attachments": attachments, "runs": runs, "events": events,
-            "attempts": list_attempts(issue_id)}
+    # 所属项目一起返回：前端直接用，不必再拉一次项目列表
+    project = None
+    if issue.get("project_id"):
+        from .. import projects as proj
+        project = proj.get_project(issue["project_id"])
+    return {"issue": issue, "project": project, "attachments": attachments, "runs": runs,
+            "events": events, "attempts": list_attempts(issue_id)}
 
 
 @router.patch("/{issue_id}")
@@ -105,6 +110,9 @@ def patch_issue(issue_id: int, payload: IssuePatch):
         data["code_scopes"] = json.dumps(data["code_scopes"], ensure_ascii=False)
     if "target_repos" in data:
         data["target_repos"] = json.dumps(data["target_repos"], ensure_ascii=False)
+    # project_id=0 表示取消归属（前端 clearable 传 0）
+    if "project_id" in data:
+        data["project_id"] = data["project_id"] or None
     if "target_repo" in data and data["target_repo"]:
         from ..fix import is_repo_root
         if not is_repo_root(data["target_repo"]):

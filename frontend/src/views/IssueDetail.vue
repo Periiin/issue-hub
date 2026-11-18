@@ -1,555 +1,307 @@
 <template>
-  <div v-if="issue" class="detail">
-    <!-- 头图 -->
-    <section class="hero ih-card">
-      <div class="hero-top">
-        <div class="hero-main">
-          <div class="hero-eyebrow">
-            <span class="ih-mono">#{{ issue.id }}</span>
-            <span class="status"><i :class="['dot', dotClass(issue.status)]" />{{ issue.status }}</span>
+  <div v-if="issue" class="detail-layout">
+    <!-- ================= 左栏：问题本身（只读为主） ================= -->
+    <div class="detail-main">
+      <!-- 头图 -->
+      <section class="hero ih-card">
+        <div class="hero-top">
+          <div class="hero-main">
+            <div class="hero-eyebrow">
+              <span class="ih-mono">#{{ issue.id }}</span>
+              <span class="status"><i :class="['dot', dotClass(issue.status)]" />{{ issue.status }}</span>
+            </div>
+            <h1 class="hero-title">{{ issue.title }}</h1>
+            <div class="hero-meta">
+              <span v-if="issue.reporter">提出人 {{ issue.reporter }}</span>
+              <span v-if="issue.module">模块 {{ issue.module }}</span>
+              <span>创建 {{ issue.created_at }}</span>
+            </div>
+            <!-- 所属项目：选定后代码范围与可改仓库都从这里带出 -->
+            <div class="project-row">
+              <span class="project-label">项目</span>
+              <el-select
+                v-model="projectId" clearable placeholder="未指定项目" class="project-select"
+                @change="changeProject"
+              >
+                <el-option v-for="p in projects" :key="p.id" :label="p.name" :value="p.id"
+                           :disabled="p.ignored">
+                  <span>{{ p.name }}</span>
+                  <span class="opt-repos">{{ p.repos.length }} 个仓库</span>
+                </el-option>
+              </el-select>
+              <span v-if="currentProject" class="project-hint">
+                {{ currentProject.repos.map((r) => r.split(/[\\/]/).pop()).join(' · ') }}
+              </span>
+              <el-button link type="primary" class="project-jump" @click="$router.push('/settings')">
+                管理项目
+              </el-button>
+            </div>
           </div>
-          <h1 class="hero-title">{{ issue.title }}</h1>
-          <div class="hero-meta">
-            <span v-if="issue.reporter">提出人 {{ issue.reporter }}</span>
-            <span v-if="issue.module">模块 {{ issue.module }}</span>
-            <span>创建 {{ issue.created_at }}</span>
-          </div>
-        </div>
-        <div class="hero-side">
-          <div class="hero-badges">
-            <span :class="priorityClass(issue.priority)">{{ issue.priority || '未定级' }}</span>
-            <span v-if="issue.severity" class="badge badge--soft">{{ issue.severity }}</span>
-            <span v-if="issue.complexity" class="badge badge--ghost">{{ issue.complexity }}</span>
-          </div>
-          <div class="hero-actions">
-            <el-select v-model="issue.status" size="default" class="status-select" @change="changeStatus">
-              <el-option v-for="s in allStatus" :key="s" :label="s" :value="s" />
-            </el-select>
-            <el-button round @click="exportMd">导出</el-button>
-            <el-button round type="danger" plain @click="removeIssue">删除</el-button>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <!-- 原始描述 + 附件 -->
-    <section class="panel ih-card">
-      <div class="panel-head">
-        <div class="panel-title">
-          <span class="step-badge step-badge--gray">原</span>
-          <div>
-            <h2>原始描述</h2>
-            <p>甲方原话与截图，粘贴即上传</p>
-          </div>
-        </div>
-        <div class="panel-actions">
-          <input ref="fileInput" type="file" accept="image/*,application/pdf" multiple hidden @change="onPickFiles" />
-          <el-button round @click="fileInput?.click()">选择文件</el-button>
-          <el-button round type="primary" plain :loading="uploading" :disabled="!pendingFiles.length" @click="uploadNow">
-            上传{{ pendingFiles.length ? `(${pendingFiles.length})` : '' }}
-          </el-button>
-        </div>
-      </div>
-
-      <el-input
-        v-model="rawText"
-        type="textarea"
-        :rows="4"
-        resize="none"
-        placeholder="甲方原话；截图可以直接 Ctrl+V 粘贴"
-        class="raw-input"
-        @paste="onPaste"
-        @blur="saveRawText"
-      />
-
-      <div v-if="attachments.length" class="thumbs">
-        <div v-for="a in attachments" :key="a.id" class="thumb">
-          <el-image
-            v-if="isImage(a)"
-            :src="fileUrl(a.path)"
-            :preview-src-list="imageUrls"
-            fit="cover"
-            class="thumb-img"
-            preview-teleported
-          />
-          <a v-else :href="fileUrl(a.path)" target="_blank" class="file-link">PDF</a>
-          <button class="thumb-del" @click.stop="removeAttachment(a)">×</button>
-        </div>
-      </div>
-    </section>
-
-    <!-- ① AI 定性 -->
-    <section class="panel ih-card">
-      <div class="panel-head is-toggle" @click="toggleSection('qualify')">
-        <div class="panel-title">
-          <span class="step-badge">1</span>
-          <div>
-            <h2>AI 定性</h2>
-            <p v-if="sections.qualify">把口语化成结构化描述，人工确认后才进入定级</p>
-            <p v-else class="fold-summary">
-              <span class="fold-dot" :class="issue.qualify_final ? 'is-done' : 'is-todo'" />
-              {{ issue.qualify_final ? '已确认定性' : '尚未确认' }}
-            </p>
-          </div>
-        </div>
-        <div class="panel-actions" @click.stop>
-          <el-select v-model="provider" size="default" class="provider-select">
-            <el-option v-for="p in providers" :key="p" :label="p" :value="p" />
-          </el-select>
-          <el-button type="primary" round :loading="qualifying" @click="doQualify">
-            {{ issue.qualify_final ? '重新定性' : 'AI 定性' }}
-          </el-button>
-        </div>
-        <span class="fold-arrow" :class="{ 'is-open': sections.qualify }" />
-      </div>
-
-      <div v-show="sections.qualify" class="fold-body">
-      <div class="state-chip" :class="issue.qualify_final ? 'is-done' : 'is-todo'">
-        <span>{{ issue.qualify_final ? '已确认定性' : '尚未确认' }}</span>
-        <span class="ih-muted" v-if="issue.qualify_final">{{ issue.updated_at }}</span>
-      </div>
-
-      <el-form label-position="top" class="qualify-form">
-        <el-form-item label="标题">
-          <el-input v-model="q.title" />
-        </el-form-item>
-        <el-form-item label="现象">
-          <el-input v-model="q.phenomenon" type="textarea" :rows="2" resize="none" />
-        </el-form-item>
-        <el-form-item label="复现步骤">
-          <el-input v-model="q.repro_text" type="textarea" :rows="3" resize="none" placeholder="一行一步" />
-        </el-form-item>
-        <div class="two-col">
-          <el-form-item label="期望结果">
-            <el-input v-model="q.expected" type="textarea" :rows="2" resize="none" />
-          </el-form-item>
-          <el-form-item label="实际结果">
-            <el-input v-model="q.actual" type="textarea" :rows="2" resize="none" />
-          </el-form-item>
-        </div>
-        <div class="two-col">
-          <el-form-item label="影响范围">
-            <el-input v-model="q.scope" type="textarea" :rows="2" resize="none" />
-          </el-form-item>
-          <el-form-item label="待确认点">
-            <el-input v-model="q.uncertain_text" type="textarea" :rows="2" resize="none" placeholder="一行一条" />
-          </el-form-item>
-        </div>
-        <el-form-item label="归属模块">
-          <el-input v-model="q.module" />
-        </el-form-item>
-      </el-form>
-
-      <div class="panel-foot">
-        <el-button type="success" round :loading="confirming" @click="doConfirm">确认定性，进入定级</el-button>
-      </div>
-      </div>
-    </section>
-
-    <!-- ② AI 定级 -->
-    <section class="panel ih-card">
-      <div class="panel-head is-toggle" @click="toggleSection('triage')">
-        <div class="panel-title">
-          <span class="step-badge">2</span>
-          <div>
-            <h2>AI 定级</h2>
-            <p v-if="sections.triage">影响等级、修复复杂度、优先级，可手动修正</p>
-            <p v-else class="fold-summary">
+          <div class="hero-side">
+            <div class="hero-badges">
               <span :class="priorityClass(issue.priority)">{{ issue.priority || '未定级' }}</span>
-              <span class="ih-muted">{{ [issue.severity, issue.complexity].filter(Boolean).join(' · ') || '待定级' }}</span>
-            </p>
-          </div>
-        </div>
-        <div class="panel-actions" @click.stop>
-          <el-button type="primary" round :loading="triaging" @click="doTriage">生成定级</el-button>
-        </div>
-        <span class="fold-arrow" :class="{ 'is-open': sections.triage }" />
-      </div>
-
-      <div v-show="sections.triage" class="fold-body">
-      <div class="triage-grid">
-        <div class="triage-cell">
-          <span class="triage-label">影响等级</span>
-          <el-select v-model="issue.severity" clearable placeholder="S1-S4" @change="saveTriageManual">
-            <el-option v-for="s in ['S1', 'S2', 'S3', 'S4']" :key="s" :label="s" :value="s" />
-          </el-select>
-        </div>
-        <div class="triage-cell">
-          <span class="triage-label">修复复杂度</span>
-          <el-select v-model="issue.complexity" clearable placeholder="简单/中等/复杂" @change="saveTriageManual">
-            <el-option v-for="s in ['简单', '中等', '复杂']" :key="s" :label="s" :value="s" />
-          </el-select>
-        </div>
-        <div class="triage-cell">
-          <span class="triage-label">优先级</span>
-          <el-select v-model="issue.priority" clearable placeholder="P0-P3" @change="saveTriageManual">
-            <el-option v-for="s in ['P0', 'P1', 'P2', 'P3']" :key="s" :label="s" :value="s" />
-          </el-select>
-        </div>
-      </div>
-
-      <div v-if="triage" class="triage-detail">
-        <div v-if="triage.reasons?.length" class="reason-box">
-          <h3>定级依据</h3>
-          <ul><li v-for="(r, i) in triage.reasons" :key="i">{{ r }}</li></ul>
-        </div>
-        <div class="triage-meta">
-          <span v-if="triage.suggested_owner">建议处理人：{{ triage.suggested_owner }}</span>
-          <span v-if="triage.estimated_effort">预估：{{ triage.estimated_effort }}</span>
-        </div>
-        <div v-if="triage.risks?.length" class="reason-box reason-box--warn">
-          <h3>风险点</h3>
-          <ul><li v-for="(r, i) in triage.risks" :key="i">{{ r }}</li></ul>
-        </div>
-      </div>
-      <el-empty v-else description="确认定性后点「生成定级」" :image-size="70" />
-      </div>
-    </section>
-
-    <!-- ③ 操作解决 -->
-    <section class="panel ih-card">
-      <div class="panel-head is-toggle" @click="toggleSection('fix')">
-        <div class="panel-title">
-          <span class="step-badge">3</span>
-          <div>
-            <h2>操作解决</h2>
-            <p v-if="sections.fix">分析可跨目录；改代码在独立 worktree 里进行，人工采纳才合并</p>
-            <p v-else class="fold-summary">
-              <span v-if="selectedRepos.length" class="ih-muted">目标仓库 {{ selectedRepos.length }} 个</span>
-              <span>{{ fixFoldSummary }}</span>
-            </p>
-          </div>
-        </div>
-        <div class="panel-actions" @click.stop>
-          <el-button type="warning" round :loading="fixing" @click="doFix">生成修复方案</el-button>
-          <el-button
-            v-if="selectedRepos.length"
-            type="primary" round :loading="applying" :disabled="!canApply"
-            @click="doApply"
-          >开始修改</el-button>
-        </div>
-        <span class="fold-arrow" :class="{ 'is-open': sections.fix }" />
-      </div>
-
-      <div v-show="sections.fix" class="fold-body">
-
-      <!-- 代码范围（分析用，多选） -->
-      <div class="field-block">
-        <div class="field-head">
-          <span class="field-title">代码范围</span>
-          <span class="ih-muted">分析时搜索的目录，可多选（父目录也能选）</span>
-        </div>
-        <div class="scope-list">
-          <button
-            v-for="r in roots"
-            :key="r.path"
-            class="scope-chip"
-            :class="{ 'is-on': selectedScopes.includes(r.path), 'is-missing': !r.exists }"
-            @click="toggleScope(r.path)"
-          >
-            <span class="scope-name">{{ r.name }}</span>
-            <span v-if="r.isGit" class="scope-badge">git</span>
-            <span v-if="!r.exists" class="scope-badge scope-badge--warn">不存在</span>
-          </button>
-        </div>
-      </div>
-
-      <!-- 目标仓库（改代码用，多选；随代码范围自动带出） -->
-      <div class="field-block">
-        <div class="field-head">
-          <span class="field-title">目标仓库</span>
-          <span class="ih-muted">勾代码范围会自动带出对应仓库，可多个</span>
-        </div>
-        <div class="scope-list">
-          <button
-            v-for="r in targetRepos"
-            :key="r.path"
-            class="scope-chip"
-            :class="{ 'is-on': isRepoSelected(r.path), 'is-missing': !r.exists }"
-            @click="toggleRepo(r.path)"
-          >
-            <span class="scope-name">{{ r.name }}</span>
-            <span v-if="r.covers?.length" class="scope-badge">
-              {{ r.covers.length }} 子项目
-            </span>
-            <span v-if="!r.exists" class="scope-badge scope-badge--warn">不存在</span>
-          </button>
-        </div>
-        <div v-if="selectedRepos.length" class="repo-detail">
-          <div v-for="p in uniqRepos" :key="p" class="repo-detail-row">
-            <code>{{ p }}</code>
-          </div>
-        </div>
-      </div>
-
-      <!-- 范围与目标仓库不一致时的提示 -->
-      <div v-if="outOfRepoScopes.length" class="scope-warn">
-        <b>代码范围与目标仓库不匹配</b>
-        <div class="scope-warn-body">
-          这些目录不在已选目标仓库内，AI 在 worktree 里无法修改：
-          <code v-for="s in outOfRepoScopes" :key="s">{{ s }}</code>
-        </div>
-        <div class="scope-warn-tip">
-          勾上覆盖它们的仓库后这些目录才能被修改<template v-if="reposInScopes.length">（当前范围涉及 {{ reposInScopes.length }} 个仓库）</template>。
-        </div>
-      </div>
-
-      <div v-if="selectedRepos.length && !canApply" class="apply-hint">
-        当前执行器 <b>{{ provider }}</b> 只能分析；改代码请切到 <b>claude</b> 或 <b>dsh</b>（在 ① 里切换）。
-      </div>
-
-      <!-- 修复上下文（给用户看、可编辑，也会喂给 agent） -->
-      <el-collapse v-model="contextOpen" class="flow-collapse ctx-collapse">
-        <el-collapse-item name="ctx">
-          <template #title>
-            <span class="flow-title">修复边界（上下文文件）</span>
-            <span class="ih-muted flow-hint">AI 按这里的说明改代码 · 可编辑</span>
-          </template>
-          <div class="ctx-body">
-            <div class="ctx-toolbar">
-              <span class="ih-muted ctx-path">{{ contextPath }}</span>
-              <el-button size="small" round :loading="contextLoading" @click="regenerateContext">
-                按当前范围重新生成
-              </el-button>
-              <el-button size="small" round type="primary" :loading="contextSaving" @click="saveContext">
-                保存
-              </el-button>
+              <span v-if="issue.severity" class="badge badge--soft">{{ issue.severity }}</span>
+              <span v-if="issue.complexity" class="badge badge--ghost">{{ issue.complexity }}</span>
             </div>
-            <el-input
-              v-model="contextDraft" type="textarea" :rows="16" class="ctx-input"
-              placeholder="这里会显示本次修复的边界说明：哪些仓库能改、哪些不能碰、有哪些约束。可以自己改。"
-            />
-            <div class="ih-muted ctx-hint">
-              「自动生成区」会被重新生成覆盖；「你维护区」里的内容永远保留。
+            <div class="hero-actions">
+              <el-select v-model="issue.status" class="status-select" @change="changeStatus">
+                <el-option v-for="s in allStatus" :key="s" :label="s" :value="s" />
+              </el-select>
+              <el-button round @click="exportMd">导出</el-button>
+              <el-button round type="danger" plain @click="removeIssue">删除</el-button>
             </div>
           </div>
-        </el-collapse-item>
-      </el-collapse>
+        </div>
+      </section>
 
-      <!-- 分析流程图（默认折叠，有 flow 才显示） -->
-      <el-collapse v-if="fixFlow" v-model="flowOpen" class="flow-collapse">
-        <el-collapse-item name="flow">
-          <template #title>
-            <span class="flow-title">分析流程图</span>
-            <span class="ih-muted flow-hint">故障链路 · 点开查看</span>
-          </template>          <MermaidView v-if="flowOpen.includes('flow')" :code="fixFlow" :dark="isDark" />
-        </el-collapse-item>
-      </el-collapse>
-
-      <!-- 分析结果 -->
-      <div v-if="fixPlan" class="fix-plan">
-        <div class="fix-row"><span class="fix-k">根因</span><span class="fix-v">{{ fixPlan.root_cause }}</span></div>
-        <div v-if="fixPlan.files?.length" class="fix-row">
-          <span class="fix-k">涉及文件</span>
-          <span class="fix-v"><code v-for="(f, i) in fixPlan.files" :key="i">{{ f }}</code></span>
-        </div>
-        <div v-if="fixPlan.changes?.length" class="fix-row">
-          <span class="fix-k">改动点</span>
-          <span class="fix-v"><ul><li v-for="(c, i) in fixPlan.changes" :key="i">{{ c }}</li></ul></span>
-        </div>
-        <div v-if="fixPlan.verification?.length" class="fix-row">
-          <span class="fix-k">验证方式</span>
-          <span class="fix-v"><ul><li v-for="(c, i) in fixPlan.verification" :key="i">{{ c }}</li></ul></span>
-        </div>
-        <div v-if="fixPlan.risks?.length" class="fix-row">
-          <span class="fix-k">风险</span>
-          <span class="fix-v"><ul><li v-for="(c, i) in fixPlan.risks" :key="i">{{ c }}</li></ul></span>
-        </div>
-      </div>
-      <div v-else-if="!fixState" class="ih-muted fix-empty">还没有分析结果，点「生成修复方案」。</div>
-
-      <!-- worktree 结果：按仓库分组，各自独立采纳/驳回 -->
-      <div v-if="repoStateList.length" class="worktree">
-        <div class="wt-head">
-          <div class="wt-meta">
-            <span class="wt-tag">worktree</span>
-            <span class="ih-muted">{{ repoStateList.length }} 个仓库</span>
-          </div>
-          <div class="wt-actions">
-            <el-button size="small" round @click="refreshDiff">刷新 diff</el-button>
-            <el-button
-              v-if="hasAnyDiff && repoStateList.some((r) => !r.state.accepted && r.state.status !== 'failed')"
-              size="small" round type="success" :loading="accepting" @click="doAccept()"
-            >全部采纳</el-button>
-            <el-button
-              size="small" round type="danger" plain :loading="rejecting" @click="doReject()"
-            >全部驳回</el-button>
-          </div>
-        </div>
-
-        <div v-for="r in repoStateList" :key="r.path" class="repo-card">
-          <div class="repo-card-head">
-            <div class="repo-card-title">
-              <b>{{ r.name }}</b>
-              <span class="repo-card-status" :class="`is-${r.state.status || 'unknown'}`">
-                {{ r.state.status === 'failed' ? '失败' : r.state.status === 'unchanged' ? '无改动' : r.state.accepted ? '已采纳' : '待审阅' }}
-              </span>
-              <code class="repo-card-path">{{ r.path }}</code>
+      <!-- 原始描述 + 附件 -->
+      <section class="panel ih-card">
+        <div class="panel-head is-toggle" @click="toggleSection('raw')">
+          <div class="panel-title">
+            <span class="step-badge step-badge--gray">原</span>
+            <div>
+              <h2>原始描述</h2>
+              <p v-if="sections.raw">甲方原话与截图，粘贴即上传</p>
+              <p v-else class="fold-summary">
+                {{ rawText ? rawText.slice(0, 40) + (rawText.length > 40 ? '…' : '') : '（无文字）' }}
+                <span v-if="attachments.length" class="ih-muted">· {{ attachments.length }} 个附件</span>
+              </p>
             </div>
-            <div class="repo-card-actions">
-              <el-button
-                v-if="r.state.branch" size="small" round type="success"
-                :disabled="r.state.accepted || r.state.status === 'failed'"
-                :loading="accepting" @click="doAccept(r.path)"
-              >采纳</el-button>
-              <el-button
-                size="small" round type="danger" plain :loading="rejecting" @click="doReject(r.path)"
-              >驳回</el-button>
+          </div>
+          <div class="panel-actions" @click.stop>
+            <input ref="fileInput" type="file" accept="image/*,application/pdf" multiple hidden @change="onPickFiles" />
+            <el-button round @click="fileInput?.click()">选择文件</el-button>
+            <el-button round type="primary" plain :loading="uploading" :disabled="!pendingFiles.length" @click="uploadNow">
+              上传{{ pendingFiles.length ? `(${pendingFiles.length})` : '' }}
+            </el-button>
+          </div>
+          <span class="fold-arrow" :class="{ 'is-open': sections.raw }" />
+        </div>
+
+        <div v-show="sections.raw" class="fold-body">
+          <el-input
+            v-model="rawText" type="textarea" :rows="4" resize="none"
+            placeholder="甲方原话；截图可以直接 Ctrl+V 粘贴"
+            class="raw-input" @paste="onPaste" @blur="saveRawText"
+          />
+          <div v-if="attachments.length" class="thumbs">
+            <div v-for="a in attachments" :key="a.id" class="thumb">
+              <el-image
+                v-if="isImage(a)" :src="fileUrl(a.path)" :preview-src-list="imageUrls"
+                fit="cover" class="thumb-img" preview-teleported
+              />
+              <a v-else :href="fileUrl(a.path)" target="_blank" class="file-link">PDF</a>
+              <button class="thumb-del" @click.stop="removeAttachment(a)">×</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ① AI 定性 -->
+      <section class="panel ih-card">
+        <div class="panel-head is-toggle" @click="toggleSection('qualify')">
+          <div class="panel-title">
+            <span class="step-badge">1</span>
+            <div>
+              <h2>AI 定性</h2>
+              <p v-if="sections.qualify">把口语化成结构化描述，人工确认后才进入定级</p>
+              <p v-else class="fold-summary">
+                <i :class="['fold-dot', issue.qualify_final ? 'is-done' : 'is-todo']" />
+                {{ issue.qualify_final ? '已确认' : '尚未确认' }}
+                <span v-if="issue.qualify_final?.phenomenon" class="ih-muted">
+                  · {{ issue.qualify_final.phenomenon.slice(0, 30) }}
+                </span>
+              </p>
+            </div>
+          </div>
+          <div class="panel-actions" @click.stop>
+            <el-select v-model="provider" class="provider-select">
+              <el-option v-for="p in providers" :key="p" :label="p" :value="p" />
+            </el-select>
+            <el-button type="primary" round :loading="qualifying" @click="doQualify">
+              {{ issue.qualify_final ? '重新定性' : 'AI 定性' }}
+            </el-button>
+          </div>
+          <span class="fold-arrow" :class="{ 'is-open': sections.qualify }" />
+        </div>
+
+        <div v-show="sections.qualify" class="fold-body">
+          <el-form label-position="top" class="qualify-form">
+            <el-form-item label="标题"><el-input v-model="q.title" /></el-form-item>
+            <el-form-item label="现象">
+              <el-input v-model="q.phenomenon" type="textarea" :rows="2" resize="none" />
+            </el-form-item>
+            <el-form-item label="复现步骤">
+              <el-input v-model="q.repro_text" type="textarea" :rows="3" resize="none" placeholder="一行一步" />
+            </el-form-item>
+            <div class="two-col">
+              <el-form-item label="期望结果">
+                <el-input v-model="q.expected" type="textarea" :rows="2" resize="none" />
+              </el-form-item>
+              <el-form-item label="实际结果">
+                <el-input v-model="q.actual" type="textarea" :rows="2" resize="none" />
+              </el-form-item>
+            </div>
+            <div class="two-col">
+              <el-form-item label="影响范围">
+                <el-input v-model="q.scope" type="textarea" :rows="2" resize="none" />
+              </el-form-item>
+              <el-form-item label="待确认点">
+                <el-input v-model="q.uncertain_text" type="textarea" :rows="2" resize="none" placeholder="一行一条" />
+              </el-form-item>
+            </div>
+            <el-form-item label="归属模块"><el-input v-model="q.module" /></el-form-item>
+          </el-form>
+          <div class="panel-foot">
+            <el-button type="success" round :loading="confirming" @click="doConfirm">
+              确认定性，进入定级
+            </el-button>
+          </div>
+        </div>
+      </section>
+
+      <!-- ② AI 定级 -->
+      <section class="panel ih-card">
+        <div class="panel-head is-toggle" @click="toggleSection('triage')">
+          <div class="panel-title">
+            <span class="step-badge">2</span>
+            <div>
+              <h2>AI 定级</h2>
+              <p v-if="sections.triage">影响等级、修复复杂度、优先级，可手动修正</p>
+              <p v-else class="fold-summary">
+                <template v-if="issue.priority">
+                  <span :class="priorityClass(issue.priority)">{{ issue.priority }}</span>
+                  <span class="ih-muted">{{ issue.severity || '-' }} · {{ issue.complexity || '-' }}</span>
+                </template>
+                <span v-else class="ih-muted">未定级</span>
+              </p>
+            </div>
+          </div>
+          <div class="panel-actions" @click.stop>
+            <el-button type="primary" round :loading="triaging" @click="doTriage">生成定级</el-button>
+          </div>
+          <span class="fold-arrow" :class="{ 'is-open': sections.triage }" />
+        </div>
+
+        <div v-show="sections.triage" class="fold-body">
+          <div class="triage-grid">
+            <div class="triage-cell">
+              <span class="triage-label">影响等级</span>
+              <el-select v-model="issue.severity" clearable placeholder="S1-S4" @change="saveTriageManual">
+                <el-option v-for="s in ['S1', 'S2', 'S3', 'S4']" :key="s" :label="s" :value="s" />
+              </el-select>
+            </div>
+            <div class="triage-cell">
+              <span class="triage-label">修复复杂度</span>
+              <el-select v-model="issue.complexity" clearable placeholder="简单/中等/复杂" @change="saveTriageManual">
+                <el-option v-for="s in ['简单', '中等', '复杂']" :key="s" :label="s" :value="s" />
+              </el-select>
+            </div>
+            <div class="triage-cell">
+              <span class="triage-label">优先级</span>
+              <el-select v-model="issue.priority" clearable placeholder="P0-P3" @change="saveTriageManual">
+                <el-option v-for="s in ['P0', 'P1', 'P2', 'P3']" :key="s" :label="s" :value="s" />
+              </el-select>
             </div>
           </div>
 
-          <div v-if="r.state.branch" class="repo-card-meta">
-            <code>{{ r.state.branch }}</code>
-            <span class="ih-muted">{{ r.state.worktree }}</span>
+          <div v-if="triage" class="triage-detail">
+            <div v-if="triage.reasons?.length" class="reason-box">
+              <h3>定级依据</h3>
+              <ul><li v-for="(r, i) in triage.reasons" :key="i">{{ r }}</li></ul>
+            </div>
+            <div class="triage-meta">
+              <span v-if="triage.suggested_owner">建议处理人：{{ triage.suggested_owner }}</span>
+              <span v-if="triage.estimated_effort">预估：{{ triage.estimated_effort }}</span>
+            </div>
+            <div v-if="triage.risks?.length" class="reason-box reason-box--warn">
+              <h3>风险点</h3>
+              <ul><li v-for="(r, i) in triage.risks" :key="i">{{ r }}</li></ul>
+            </div>
           </div>
-
-          <div v-if="r.state.status === 'failed'" class="repo-error">
-            <b>修改失败</b>
-            <div>{{ r.state.error }}</div>
-          </div>
-
-          <div v-if="r.state.accepted" class="accepted-box">
-            <b>已采纳</b>
-            <span v-if="r.state.merge?.merged">已合并到 {{ r.state.merge.base_branch }}</span>
-            <span v-else>已提交到分支，需人工合并：<code>{{ r.state.merge?.command }}</code></span>
-          </div>
-
-          <template v-if="r.state.status !== 'failed'">
-            <div class="diff-stat">{{ diffs[r.path]?.stat || r.state.diff_stat || '（暂无改动）' }}</div>
-            <pre v-if="diffs[r.path]?.diff" class="diff-view"><code><span
-              v-for="(line, i) in (diffs[r.path].diff || '').split('\n')" :key="i" :class="diffLineClass(line)"
-            >{{ line + '\n' }}</span></code></pre>
-            <div v-if="diffs[r.path]?.truncated" class="ih-muted">diff 太长已截断，完整内容请到 worktree 查看。</div>
-            <div v-if="r.state.summary" class="repo-summary">{{ r.state.summary }}</div>
-          </template>
+          <el-empty v-else description="确认定性后点「生成定级」" :image-size="70" />
         </div>
-      </div>
+      </section>
 
-      <!-- 修改轮次：每轮与方案的出入、过程中发现的问题（驳回也不删，历史就是历史） -->
-      <div v-if="attempts.length" class="attempts">
-        <div class="attempts-head">
-          <span class="attempts-title">修改轮次</span>
-          <span class="ih-muted attempts-sub">
-            共 {{ attempts.length }} 轮 · 记录每次实际修改与分析方案的出入
-          </span>
-          <el-badge
-            v-if="attempts.some((a) => (a.deviations?.length || 0) + (a.found_issues?.length || 0) > 0)"
-            value="有出入" type="warning" class="attempts-badge"
+      <!-- 时间线 -->
+      <section class="panel ih-card">
+        <div class="panel-head is-toggle" @click="toggleSection('events')">
+          <div class="panel-title">
+            <span class="step-badge step-badge--gray">迹</span>
+            <div>
+              <h2>操作记录</h2>
+              <p v-if="!sections.events" class="fold-summary ih-muted">{{ events.length }} 条</p>
+            </div>
+          </div>
+          <span class="fold-arrow" :class="{ 'is-open': sections.events }" />
+        </div>
+        <div v-show="sections.events" class="fold-body">
+          <el-timeline class="timeline">
+            <el-timeline-item
+              v-for="e in events" :key="e.id" :timestamp="e.created_at" placement="top"
+              :color="e.type === 'status' ? '#7c3aed' : e.type === 'create' ? '#12b76a' : '#c7cbe0'"
+            >
+              <div class="event-line">
+                <span class="event-type">{{ eventLabel(e.type) }}</span>
+                <span v-if="e.from_status || e.to_status" class="ih-muted">
+                  {{ e.from_status || '-' }} → {{ e.to_status || '-' }}
+                </span>
+                <span v-if="e.note" class="event-note">{{ e.note }}</span>
+              </div>
+            </el-timeline-item>
+          </el-timeline>
+        </div>
+      </section>
+    </div>
+
+    <!-- ================= 右栏：操作台（宽屏） ================= -->
+    <aside v-if="!isMobile" class="detail-side">
+      <FixWorkbench :issue-id="id" :issue="issue" :provider="provider" :project-id="projectId" @changed="refresh" />
+    </aside>
+
+    <!-- 手机：折叠成底部抽屉 -->
+    <template v-else>
+      <button class="wb-fab" @click="workbenchOpen = true">
+        <span class="wb-fab-icon">③</span>
+        <span class="wb-fab-text">操作台</span>
+        <span v-if="fabBadge" class="wb-fab-badge" :class="{ 'is-warn': fabBadge.warn }">{{ fabBadge.text }}</span>
+      </button>
+      <el-drawer
+        v-model="workbenchOpen" direction="btt" size="92%"
+        :with-header="false" append-to-body class="wb-drawer"
+      >
+        <div class="wb-drawer-bar">
+          <span class="wb-drawer-title">操作台</span>
+          <el-button link @click="workbenchOpen = false">收起</el-button>
+        </div>
+        <div class="wb-drawer-body">
+          <FixWorkbench
+            v-if="workbenchOpen" :issue-id="id" :issue="issue" :provider="provider"
+            :project-id="projectId" @changed="refresh"
           />
         </div>
-        <el-collapse v-model="openAttempts" class="attempts-collapse">
-          <el-collapse-item
-            v-for="a in attempts" :key="a.seq" :name="a.seq"
-          >
-            <template #title>
-              <span class="attempt-title">
-                <span class="attempt-seq">第 {{ a.seq }} 次</span>
-                <span class="attempt-status" :class="`is-${a.status}`">{{ attemptStatusLabel(a) }}</span>
-                <span
-                  v-if="(a.deviations?.length || 0) + (a.found_issues?.length || 0) > 0"
-                  class="attempt-flag"
-                >与方案有出入</span>
-                <span v-if="a.files?.length" class="ih-muted attempt-files">{{ a.files.length }} 个文件</span>
-                <span class="ih-muted attempt-time">{{ (a.created_at || '').slice(0, 19) }}</span>
-              </span>
-            </template>
-            <div class="attempt-body">
-              <div v-if="a.deviations?.length" class="attempt-sec attempt-sec--warn">
-                <div class="attempt-sec-title">与方案的出入</div>
-                <ul><li v-for="(d, i) in a.deviations" :key="i">{{ d }}</li></ul>
-              </div>
-              <div v-if="a.found_issues?.length" class="attempt-sec attempt-sec--info">
-                <div class="attempt-sec-title">过程中发现的新问题</div>
-                <ul><li v-for="(d, i) in a.found_issues" :key="i">{{ d }}</li></ul>
-              </div>
-              <div v-if="a.actual_root_cause" class="attempt-sec">
-                <div class="attempt-sec-title">实际根因</div>
-                <div class="attempt-sec-text">{{ a.actual_root_cause }}</div>
-              </div>
-              <div v-if="a.files?.length" class="attempt-sec">
-                <div class="attempt-sec-title">改动文件</div>
-                <code v-for="(f, i) in a.files" :key="i" class="attempt-file">{{ f }}</code>
-              </div>
-              <div v-if="a.risks?.length" class="attempt-sec">
-                <div class="attempt-sec-title">风险</div>
-                <ul><li v-for="(d, i) in a.risks" :key="i">{{ d }}</li></ul>
-              </div>
-              <div v-if="a.verification" class="attempt-sec">
-                <div class="attempt-sec-title">验证方式</div>
-                <div class="attempt-sec-text">{{ a.verification }}</div>
-              </div>
-              <div v-if="a.summary" class="attempt-sec">
-                <div class="attempt-sec-title">总结</div>
-                <div class="attempt-sec-text attempt-summary">{{ a.summary }}</div>
-              </div>
-              <div v-if="a.repos" class="attempt-repos">
-                <div
-                  v-for="(st, rp) in a.repos" :key="rp" class="attempt-repo-row"
-                >
-                  <span class="ih-muted">{{ rp.split(/[\\/]/).pop() }}</span>
-                  <span class="attempt-repo-status" :class="`is-${st.status}`">
-                    {{ st.status === 'failed' ? '失败' : st.status === 'unchanged' ? '无改动' : '有改动' }}
-                  </span>
-                  <span v-if="st.error" class="attempt-repo-err">{{ st.error }}</span>
-                </div>
-              </div>
-            </div>
-          </el-collapse-item>
-        </el-collapse>
-      </div>
-      </div>
-    </section>
-
-    <!-- 时间线 -->
-    <section class="panel ih-card">
-      <div class="panel-head">
-        <div class="panel-title">
-          <span class="step-badge step-badge--gray">迹</span>
-          <div><h2>操作记录</h2></div>
-        </div>
-      </div>
-      <el-timeline class="timeline">
-        <el-timeline-item
-          v-for="e in events"
-          :key="e.id"
-          :timestamp="e.created_at"
-          placement="top"
-          :color="e.type === 'status' ? '#7c3aed' : e.type === 'create' ? '#12b76a' : '#c7cbe0'"
-        >
-          <div class="event-line">
-            <span class="event-type">{{ eventLabel(e.type) }}</span>
-            <span v-if="e.from_status || e.to_status" class="ih-muted">
-              {{ e.from_status || '-' }} → {{ e.to_status || '-' }}
-            </span>
-            <span v-if="e.note" class="event-note">{{ e.note }}</span>
-          </div>
-        </el-timeline-item>
-      </el-timeline>
-    </section>
+      </el-drawer>
+    </template>
   </div>
 
-  <div v-else class="loading-wrap">
-    <el-skeleton :rows="8" animated />
-  </div>
+  <div v-else class="loading-wrap"><el-skeleton :rows="8" animated /></div>
 </template>
 
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import MermaidView from '../components/MermaidView.vue'
-import { useTheme } from '../useTheme'
+import FixWorkbench from './FixWorkbench.vue'
+import { useMobile } from '../useMobile'
 import {
-  acceptFix, applyFix, confirmQualify, deleteAttachment, deleteIssue, fileUrl,
-  getCodeRoots, getFixContext, getFixDiff, getIssue, getSettings, patchIssue,
-  regenerateFixContext, rejectFix, runFix, runQualify, runTriage, saveFixContext,
-  uploadAttachments, type CodeRoot, type TargetRepo, type FixAttempt
+  confirmQualify, deleteAttachment, deleteIssue, fileUrl, getIssue, getProjects,
+  getSettings, patchIssue, runQualify, runTriage, uploadAttachments, type Project
 } from '../api'
 
 const route = useRoute()
 const router = useRouter()
 const id = computed(() => Number(route.params.id))
-const { isDark } = useTheme()
+const isMobile = useMobile()
 
 const issue = ref<any>(null)
 const attachments = ref<any[]>([])
@@ -565,20 +317,39 @@ const uploading = ref(false)
 const qualifying = ref(false)
 const confirming = ref(false)
 const triaging = ref(false)
-const fixing = ref(false)
 
-/* ===== ③ 操作解决：代码范围 / worktree / diff ===== */
-/** 设置里的代码目录候选 */
-const roots = ref<CodeRoot[]>([])
-/** 分析用（可多选），存到 issue.code_scopes */
-const selectedScopes = ref<string[]>([])
-/** 改代码用（可多个 git 仓库），存到 issue.target_repos；勾代码范围时自动带出 */
-const selectedRepos = ref<string[]>([])
-/** 每个仓库的 diff（key 是仓库路径） */
-const diffs = ref<Record<string, any>>({})
-const applying = ref(false)
-const accepting = ref(false)
-const rejecting = ref(false)
+const workbenchOpen = ref(false)
+
+/* ===== 所属项目 ===== */
+const projects = ref<Project[]>([])
+const projectId = ref<number | null>(null)
+const currentProject = computed(
+  () => projects.value.find((p) => p.id === projectId.value) || null
+)
+
+const loadProjects = async () => {
+  const r = await getProjects().catch(() => null)
+  projects.value = r?.projects || []
+}
+
+/**
+ * 切换项目：项目决定默认代码范围与可改仓库。
+ * 换项目时清掉原来手填的 code_scopes / target_repos，否则会残留上一个项目的路径。
+ */
+const changeProject = async (val: number | null) => {
+  await patchIssue(id.value, {
+    project_id: val ?? 0,
+    code_scopes: [],
+    target_repos: []
+  })
+  if (issue.value) {
+    issue.value.project_id = val
+    issue.value.code_scopes = []
+    issue.value.target_repos = []
+  }
+  ElMessage.success(val ? `已归属到「${currentProject.value?.name || ''}」` : '已取消项目归属')
+  await refresh()
+}
 
 const q = reactive({
   title: '', phenomenon: '', repro_text: '', expected: '', actual: '',
@@ -586,24 +357,15 @@ const q = reactive({
 })
 
 const triage = computed(() => issue.value?.triage || null)
-const fixPlan = computed(() => issue.value?.fix_plan || null)
 
-/* ===== 分析流程图 ===== */
-/** AI 分析产出的 Mermaid 源码；老数据没有这个字段时整块隐藏 */
-const fixFlow = computed<string>(() => {
-  const raw = fixPlan.value?.flow
-  return typeof raw === 'string' ? raw.trim() : ''
+/* ===== 折叠：按状态给默认值，之后用户手动切换不被覆盖 ===== */
+type SectionKey = 'raw' | 'qualify' | 'triage' | 'events'
+const sections = reactive<Record<SectionKey, boolean>>({
+  raw: true, qualify: true, triage: true, events: true
 })
-/** 折叠状态：默认收起，用户点开才渲染（mermaid 按需加载） */
-const flowOpen = ref<string[]>([])
-const fixState = computed(() => issue.value?.fix_state || null)
-
-/* ===== 三段面板的折叠 ===== */
-const sections = reactive({ qualify: true, triage: true, fix: true })
-/** 只在进入某个 issue 时按状态设置一次默认展开；之后用户手动切换不被覆盖 */
 let defaultedIssue = 0
 
-const toggleSection = (name: 'qualify' | 'triage' | 'fix') => {
+const toggleSection = (name: SectionKey) => {
   sections[name] = !sections[name]
 }
 
@@ -612,187 +374,36 @@ const applySectionDefaults = () => {
   defaultedIssue = issue.value.id
   const st = issue.value.status || ''
   if (st === '待定性') {
-    Object.assign(sections, { qualify: true, triage: false, fix: false })
+    Object.assign(sections, { raw: true, qualify: true, triage: false, events: false })
   } else if (st === '待定级') {
-    Object.assign(sections, { qualify: false, triage: true, fix: false })
-  } else if (['待处理', '处理中', '待验收'].includes(st)) {
-    Object.assign(sections, { qualify: false, triage: false, fix: true })
+    Object.assign(sections, { raw: true, qualify: false, triage: true, events: false })
   } else {
-    // 已解决 / 不修 / 无法复现：全部收起，页面只剩摘要
-    Object.assign(sections, { qualify: false, triage: false, fix: false })
+    // 待处理及之后：定性/定级收起，把空间留给时间线
+    Object.assign(sections, { raw: true, qualify: false, triage: false, events: true })
   }
 }
 
-/** 收起时标题旁的摘要：让用户不用展开也能看到关键结果 */
-const fixFoldSummary = computed(() => {
-  const pending = repoStateList.value.filter((r) => r.state.status === 'changed' && !r.state.accepted).length
-  if (pending) return `${pending} 待审阅`
-  if (!repoStateList.value.length && !attempts.value.length) return '未开始'
-  if (repoStateList.value.length) {
-    const accepted = repoStateList.value.filter((r) => r.state.accepted).length
-    const failed = repoStateList.value.filter((r) => r.state.status === 'failed').length
-    const parts: string[] = []
-    if (accepted) parts.push(`${accepted} 已采纳`)
-    if (failed) parts.push(`${failed} 失败`)
-    return parts.length ? parts.join(' · ') : '无改动'
-  }
-  return `${attempts.value.length} 轮修改记录`
+/* ===== 手机 FAB 角标（有待审改动或新出入时提示） ===== */
+const fabBadge = computed(() => {
+  const states = issue.value?.fix_state?.repos || {}
+  const pending = Object.values(states).filter(
+    (s: any) => s?.status === 'changed' && !s?.accepted
+  ).length
+  const attempts = issue.value?.attempts || []
+  const first = attempts[0]
+  const deviated = first &&
+    ((first.deviations?.length || 0) + (first.found_issues?.length || 0) > 0)
+  if (deviated) return { text: '有出入', warn: true }
+  if (pending) return { text: `${pending} 待审`, warn: false }
+  return null
 })
 
-/* ===== 修改轮次（每轮与方案的出入） ===== */
-const attempts = ref<FixAttempt[]>([])
-const openAttempts = ref<number[]>([])
-
-const loadAttempts = (list?: FixAttempt[]) => {
-  attempts.value = list || []
-  // 默认只展开最新一轮；有出入的轮次更值得看
-  const withDeviation = attempts.value.find((a) => (a.deviations?.length || 0) + (a.found_issues?.length || 0) > 0)
-  openAttempts.value = withDeviation ? [withDeviation.seq] : attempts.value.length ? [attempts.value[0].seq] : []
-}
-
-const attemptStatusLabel = (a: FixAttempt) =>
-  ({ changed: '有改动', unchanged: '无改动', failed: '失败', partial: '部分成功' } as any)[a.status || ''] || a.status || '-'
-
-/** 可做 worktree 的仓库根（后端已按 repoRoot 去重，含 covers 子目录信息） */
-const targetRepos = ref<TargetRepo[]>([])
-const canApply = computed(
-  () => selectedRepos.value.length > 0 && ['claude', 'dsh'].includes(provider.value)
-)
-
-/* ===== 代码范围 × 目标仓库 ===== */
-
-/** 统一成可比较的形式：反斜杠转正斜杠、去尾斜杠、小写（Windows 大小写不敏感） */
-const normPath = (p: string) => (p || '').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
-
-/** 判断 child 是否在 parent 目录之下（含相等） */
-const isUnder = (child: string, parent: string) => {
-  const c = normPath(child)
-  const p = normPath(parent)
-  if (!c || !p) return false
-  return c === p || c.startsWith(p + '/')
-}
-
-/** 目标仓库覆盖的路径集合（仓库根 + 它覆盖的子目录） */
-const coveredBy = (repo: TargetRepo | undefined) => {
-  if (!repo) return [] as string[]
-  return [repo.path, ...(repo.covers || [])]
-}
-
-/** 代码范围里实际涉及到的仓库（勾范围时自动映射成目标仓库） */
-const reposInScopes = computed(() =>
-  targetRepos.value.filter((repo) =>
-    coveredBy(repo).some((c) => selectedScopes.value.some((s) => isUnder(s, c)))
-  )
-)
-
-/** 勾了代码范围、但不属于任何已选目标仓库的目录（改代码时会被静默忽略） */
-const outOfRepoScopes = computed(() => {
-  if (!selectedRepos.value.length) return [] as string[]
-  const covered = selectedRepos.value.flatMap((p) => {
-    const r = targetRepos.value.find((x) => normPath(x.path) === normPath(p))
-    return coveredBy(r)
-  })
-  if (!covered.length) return [] as string[]
-  return selectedScopes.value.filter((s) => !covered.some((c) => isUnder(s, c)))
-})
-
-/** 判断某个仓库是否已选中（路径分隔符/大小写不敏感） */
-const isRepoSelected = (path: string) =>
-  selectedRepos.value.some((p) => normPath(p) === normPath(path))
-
-/** 去重后的已选仓库（同一仓库可能因分隔符不同出现两次） */
-const uniqRepos = computed(() => {
-  const seen = new Set<string>()
-  return selectedRepos.value.filter((p) => {
-    const k = normPath(p)
-    if (seen.has(k)) return false
-    seen.add(k)
-    return true
-  })
-})
-
-/** 目标仓库的展示信息 */
-const repoInfo = (path: string) =>
-  targetRepos.value.find((r) => normPath(r.path) === normPath(path))
-
-/** 当前 fix_state 里的仓库状态（按仓库分组） */
-const repoStates = computed<Record<string, any>>(() => {
-  const s = fixState.value
-  if (!s) return {}
-  if (s.repos) return s.repos
-  // 兼容旧的单仓库扁平结构
-  if (s.repo) return { [s.repo]: { ...s } }
-  return {}
-})
-const repoStateList = computed(() =>
-  Object.entries(repoStates.value).map(([path, st]) => ({
-    path,
-    name: (st as any).name || repoInfo(path)?.name || path.split(/[\\/]/).pop(),
-    state: st as any,
-  }))
-)
-const hasAnyDiff = computed(() =>
-  repoStateList.value.some((r) => (r.state.files || []).length > 0)
-)
-
-/* ===== 修复上下文文件 ===== */
-const contextText = ref('')
-const contextPath = ref('')
-const contextOpen = ref(false)
-const contextDraft = ref('')
-const contextSaving = ref(false)
-const contextLoading = ref(false)
-
-const loadContext = async () => {
-  if (!id.value) return
-  contextLoading.value = true
-  try {
-    const r = await getFixContext(id.value)
-    contextText.value = r.text || ''
-    contextPath.value = r.path || ''
-    contextDraft.value = r.text || ''
-  } catch {
-    contextText.value = ''
-  } finally {
-    contextLoading.value = false
-  }
-}
-
-const saveContext = async () => {
-  contextSaving.value = true
-  try {
-    const r = await saveFixContext(id.value, contextDraft.value)
-    contextText.value = contextDraft.value
-    contextPath.value = r.path || contextPath.value
-    ElMessage.success('上下文已保存')
-  } catch {
-    ElMessage.error('保存失败')
-  } finally {
-    contextSaving.value = false
-  }
-}
-
-const regenerateContext = async () => {
-  contextLoading.value = true
-  try {
-    const r = await regenerateFixContext(id.value)
-    contextText.value = r.text
-    contextDraft.value = r.text
-    contextPath.value = r.path
-    ElMessage.success('已按当前范围重新生成（你手写的部分已保留）')
-  } catch {
-    ElMessage.error('重新生成失败')
-  } finally {
-    contextLoading.value = false
-  }
-}
+/* ===== 展示辅助 ===== */
 const imageUrls = computed(() =>
   attachments.value.filter((a) => (a.mime || '').startsWith('image/')).map((a) => fileUrl(a.path))
 )
-
 const priorityClass = (p: string | null) =>
   `pill ${p === 'P0' ? 'pill--p0' : p === 'P1' ? 'pill--p1' : p === 'P2' ? 'pill--p2' : p ? 'pill--p3' : 'pill--none'}`
-
 const dotClass = (s: string) => {
   if (s === '待定性') return 'dot--draft'
   if (s === '待定级') return 'dot--triage'
@@ -802,10 +413,10 @@ const dotClass = (s: string) => {
   if (s === '已解决') return 'dot--done'
   return 'dot--drop'
 }
-
 const eventLabel = (t: string) =>
-  ({ create: '新建', qualify: 'AI 定性', confirm: '人工确认', triage: 'AI 定级', fix: '生成方案', status: '状态变更' } as any)[t] || t
-
+  ({ create: '新建', qualify: 'AI 定性', confirm: '人工确认', triage: 'AI 定级', fix: '生成方案',
+     fix_apply: '开始修改', fix_accept: '采纳', fix_reject: '驳回',
+     status: '状态变更', note: '备注' } as any)[t] || t
 const isImage = (a: any) => (a.mime || '').startsWith('image/')
 
 const fillQualifyForm = (data: any) => {
@@ -820,27 +431,32 @@ const fillQualifyForm = (data: any) => {
   q.uncertain_text = (data.uncertainties || []).join('\n')
 }
 
+/* ===== 数据加载 ===== */
+/** attempts 挂到 issue 上，右栏组件直接读，避免重复请求 */
+const applyIssue = (res: any) => {
+  res.issue.attempts = res.attempts || []
+  issue.value = res.issue
+  attachments.value = res.attachments || []
+  events.value = res.events || []
+  rawText.value = res.issue.raw_text || ''
+  projectId.value = res.issue.project_id ?? null
+}
+
 const load = async () => {
   const res = await getIssue(id.value)
-  issue.value = res.issue
-  attachments.value = res.attachments
-  events.value = res.events
-  loadAttempts(res.attempts)
-  rawText.value = res.issue.raw_text || ''
-  selectedScopes.value = Array.isArray(res.issue.code_scopes) ? res.issue.code_scopes : []
-  const tr = res.issue.target_repos
-  selectedRepos.value = Array.isArray(tr) ? tr : (res.issue.target_repo ? [res.issue.target_repo] : [])
+  applyIssue(res)
   fillQualifyForm(res.issue.qualify_final || res.issue.qualify_draft)
   applySectionDefaults()
-  // 老数据没有目标仓库时，按已勾的范围自动补一次（只在首次进入时做）
-  if (!selectedRepos.value.length && selectedScopes.value.length && targetRepos.value.length) {
-    const mapped = reposInScopes.value.map((r) => r.path)
-    if (mapped.length) {
-      selectedRepos.value = mapped
-      patchIssue(id.value, { target_repos: mapped }).catch(() => {})
-    }
+}
+
+/** 右栏操作后只刷新数据，不动折叠状态、不覆盖正在编辑的定性表单 */
+const refresh = async () => {
+  const res = await getIssue(id.value)
+  const prevFinal = JSON.stringify(issue.value?.qualify_final || null)
+  applyIssue(res)
+  if (prevFinal !== JSON.stringify(res.issue.qualify_final || null)) {
+    fillQualifyForm(res.issue.qualify_final || res.issue.qualify_draft)
   }
-  if (res.issue.fix_state) await loadDiff()
 }
 
 const saveRawText = async () => {
@@ -852,17 +468,19 @@ const saveRawText = async () => {
 const changeStatus = async (status: string) => {
   await patchIssue(id.value, { status })
   ElMessage.success(`状态已改为 ${status}`)
-  await load()
+  await refresh()
 }
 
 const exportMd = () => window.open(`/api/issues/${id.value}/export`, '_blank')
 
+/* ===== 定性 / 定级 ===== */
 const doQualify = async () => {
   qualifying.value = true
+  sections.qualify = true
   try {
     const res = await runQualify(id.value, provider.value)
     fillQualifyForm(res.draft)
-    await load()
+    await refresh()
     ElMessage.success(`定性完成（${res.provider}，${res.durationMs}ms）`)
   } catch (e: any) {
     ElMessage.error(e?.response?.data?.detail || '定性失败')
@@ -885,7 +503,9 @@ const doConfirm = async () => {
       uncertainties: q.uncertain_text.split('\n').map((s) => s.trim()).filter(Boolean),
       tags: []
     })
-    await load()
+    await refresh()
+    sections.qualify = false
+    sections.triage = true
     ElMessage.success('已确认，进入待定级')
   } catch (e: any) {
     ElMessage.error(e?.response?.data?.detail || '确认失败')
@@ -898,7 +518,7 @@ const doTriage = async () => {
   triaging.value = true
   try {
     const res = await runTriage(id.value, provider.value)
-    await load()
+    await refresh()
     ElMessage.success(`定级完成：${res.triage.priority} / ${res.triage.severity}`)
   } catch (e: any) {
     ElMessage.error(e?.response?.data?.detail || '定级失败')
@@ -914,150 +534,11 @@ const saveTriageManual = async () => {
   ElMessage.success('已保存')
 }
 
-const doFix = async () => {
-  fixing.value = true
-  try {
-    const res = await runFix(id.value, provider.value)
-    await load()
-    ElMessage.success(`方案已生成（${res.provider}）`)
-  } catch (e: any) {
-    ElMessage.error(e?.response?.data?.detail || '生成失败')
-  } finally {
-    fixing.value = false
-  }
-}
-
-/* ===== 代码范围 / 目标仓库 / worktree 操作 ===== */
-
-/** 保存目标仓库列表到 issue.target_repos */
-const saveRepos = async () => {
-  await patchIssue(id.value, { target_repos: selectedRepos.value })
-}
-
-/** 勾选/取消代码范围；同时按范围自动维护目标仓库 */
-const toggleScope = async (path: string) => {
-  const next = selectedScopes.value.includes(path)
-    ? selectedScopes.value.filter((p) => p !== path)
-    : [...selectedScopes.value, path]
-  selectedScopes.value = next
-  await patchIssue(id.value, { code_scopes: next })
-  await autoMapRepos()
-}
-
-/**
- * 代码范围 → 目标仓库的自动映射。
- *
- * 规则：勾上的范围所涉及的仓库自动加进目标仓库；取消范围时，
- * 如果某个仓库已经不被任何范围覆盖，就从目标仓库里移除。
- * 用户手动勾的仓库只要还在范围覆盖内就保留。
- */
-const autoMapRepos = async () => {
-  const should = reposInScopes.value.map((r) => r.path)
-  const next = Array.from(new Set([...selectedRepos.value, ...should]))
-    .filter((p) => should.some((s) => normPath(s) === normPath(p)))
-  if (JSON.stringify(next.slice().sort()) === JSON.stringify(selectedRepos.value.slice().sort())) return
-  selectedRepos.value = next
-  await saveRepos()
-}
-
-const toggleRepo = async (path: string) => {
-  selectedRepos.value = isRepoSelected(path)
-    ? selectedRepos.value.filter((p) => normPath(p) !== normPath(path))
-    : [...selectedRepos.value, path]
-  await saveRepos()
-}
-
-const loadDiff = async () => {
-  if (!Object.keys(repoStates.value).length) return
-  try {
-    const res = await getFixDiff(id.value)
-    diffs.value = res.diffs || {}
-  } catch {
-    diffs.value = {}
-  }
-}
-
-const refreshDiff = async () => {
-  await loadDiff()
-  ElMessage.success('已刷新')
-}
-
-const doApply = async () => {
-  if (!selectedRepos.value.length) {
-    ElMessage.warning('先选择至少一个目标仓库')
-    return
-  }
-  applying.value = true
-  try {
-    const res = await applyFix(id.value, { provider: provider.value, repos: selectedRepos.value })
-    await load()
-    diffs.value = res.diffs || {}
-    if (res.attempt) loadAttempts([res.attempt, ...attempts.value])
-    const states = Object.values(res.state?.repos || {}) as any[]
-    const failed = states.filter((s) => s.status === 'failed')
-    const changed = states.filter((s) => s.status === 'changed')
-    if (failed.length && !changed.length) {
-      ElMessage.error(`${failed.length} 个仓库修改失败，看下错误详情`)
-    } else if (failed.length) {
-      ElMessage.warning(`${changed.length} 个仓库有改动，${failed.length} 个失败`)
-    } else if (!changed.length) {
-      ElMessage.warning('AI 没有产生任何文件改动，看下它的说明')
-    } else {
-      ElMessage.success(`${changed.length} 个仓库有改动，请审阅 diff`)
-    }
-  } catch (e: any) {
-    ElMessage.error(e?.response?.data?.detail || '修改失败')
-  } finally {
-    applying.value = false
-  }
-}
-
-/** 采纳：传 repo 只采纳一个，不传采纳全部 */
-const doAccept = async (repo?: string) => {
-  const label = repo ? repoInfo(repo)?.name || repo : '全部仓库'
-  await ElMessageBox.confirm(
-    `将提交 ${label} 的改动，并在主仓库干净时自动合并。继续？`, '采纳', { type: 'warning' })
-  accepting.value = true
-  try {
-    const res = await acceptFix(id.value, repo ? { repo } : {})
-    await load()
-    await loadDiff()
-    const results = Object.entries(res.results || {})
-    const merged = results.filter(([, r]: any) => r?.merge?.merged).length
-    const notMerged = results.filter(([, r]: any) => r?.ok && !r?.merge?.merged)
-    const bad = results.filter(([, r]: any) => !r?.ok)
-    if (bad.length) ElMessage.error(`${bad.length} 个仓库采纳失败：${(bad[0][1] as any).error || ''}`)
-    else if (notMerged.length) ElMessage.warning('已提交到分支，需人工合并')
-    else ElMessage.success(`已合并 ${merged} 个仓库`)
-  } catch (e: any) {
-    ElMessage.error(e?.response?.data?.detail || '采纳失败')
-  } finally {
-    accepting.value = false
-  }
-}
-
-/** 驳回：传 repo 只丢一个，不传全丢 */
-const doReject = async (repo?: string) => {
-  const label = repo ? repoInfo(repo)?.name || repo : '全部仓库'
-  await ElMessageBox.confirm(`丢弃 ${label} 的 worktree 和分支？改动会全部删除。`, '驳回', { type: 'warning' })
-  rejecting.value = true
-  try {
-    await rejectFix(id.value, repo ? { repo } : {})
-    await load()
-    if (repo) delete diffs.value[repo]
-    else diffs.value = {}
-    ElMessage.success('已丢弃')
-  } catch (e: any) {
-    ElMessage.error(e?.response?.data?.detail || '驳回失败')
-  } finally {
-    rejecting.value = false
-  }
-}
-
+/* ===== 附件 ===== */
 const onPaste = (e: ClipboardEvent) => {
   const files = Array.from(e.clipboardData?.files || [])
   if (files.length) {
-    uploadAttachments(id.value, files).then(load)
+    uploadAttachments(id.value, files).then(refresh)
     ElMessage.success(`已上传 ${files.length} 张截图`)
   }
 }
@@ -1072,14 +553,14 @@ const uploadNow = async () => {
   try {
     await uploadAttachments(id.value, pendingFiles.value)
     pendingFiles.value = []
-    await load()
+    await refresh()
   } finally {
     uploading.value = false
   }
 }
 const removeAttachment = async (a: any) => {
   await deleteAttachment(id.value, a.id)
-  await load()
+  await refresh()
 }
 const removeIssue = async () => {
   await ElMessageBox.confirm('删除后不可恢复，确认删除这条问题？', '提示', { type: 'warning' })
@@ -1087,24 +568,40 @@ const removeIssue = async () => {
   router.push('/issues')
 }
 
-watch(() => route.params.id, load)
+watch(() => route.params.id, async () => {
+  defaultedIssue = 0
+  workbenchOpen.value = false
+  await load()
+})
+
 onMounted(async () => {
-  const [s, r] = await Promise.all([
+  const [s] = await Promise.all([
     getSettings().catch(() => null),
-    getCodeRoots().catch(() => null)
+    loadProjects()
   ])
   if (s) providers.value = s.providers
-  if (r) {
-    roots.value = r.roots
-    targetRepos.value = r.targetRepos || []
-  }
   await load()
-  await loadContext()
 })
 </script>
 
 <style scoped>
-.detail { display: flex; flex-direction: column; gap: 14px; }
+/* ---------- 双栏布局 ---------- */
+.detail-layout {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 14px;
+  align-items: start;
+}
+/* 宽屏才切双栏：更窄的话右栏会挤得没法用 */
+@media (min-width: 1280px) {
+  .detail-layout {
+    grid-template-columns: minmax(0, 1fr) 500px;
+    gap: 16px;
+  }
+}
+.detail-main { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.detail-side { min-width: 0; }
+
 .loading-wrap { padding: 20px; }
 
 /* ---------- 头图 ---------- */
@@ -1127,17 +624,22 @@ onMounted(async () => {
 .hero-actions { display: flex; gap: 8px; align-items: center; }
 .status-select { width: 120px; }
 
-/* ---------- 面板 ---------- */
+/* 所属项目 */
+.project-row { display: flex; align-items: center; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+.project-label { font-size: 12px; color: var(--ih-sub); }
+.project-select { width: 180px; }
+.project-hint { font-size: 11.5px; color: var(--ih-sub); }
+.project-jump { font-size: 12px; margin-left: auto; }
+.opt-repos { float: right; margin-left: 12px; font-size: 11px; color: var(--ih-sub); }
+
+/* ---------- 面板（含折叠） ---------- */
 .panel { padding: 18px 20px; }
 .panel-head {
   display: flex; justify-content: space-between; align-items: flex-start;
   gap: 12px; flex-wrap: wrap; margin-bottom: 14px;
 }
-/* 可折叠面板：整条 head 可点；标题占满剩余空间，箭头贴最右 */
 .panel-head.is-toggle {
-  cursor: pointer; user-select: none;
-  justify-content: flex-start;
-  margin-bottom: 0;
+  cursor: pointer; user-select: none; justify-content: flex-start; margin-bottom: 0;
 }
 .panel-head.is-toggle .panel-title { flex: 1 1 auto; min-width: 0; }
 .panel-head.is-toggle:hover h2 { color: var(--el-color-primary); }
@@ -1149,12 +651,10 @@ onMounted(async () => {
 }
 .fold-arrow.is-open { transform: rotate(45deg); }
 .fold-summary {
-  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
   margin: 3px 0 0; font-size: 12px; color: var(--ih-ink);
 }
-.fold-dot {
-  width: 7px; height: 7px; border-radius: 50%;
-}
+.fold-dot { width: 7px; height: 7px; border-radius: 50%; }
 .fold-dot.is-done { background: #12b76a; }
 .fold-dot.is-todo { background: #f0a13c; }
 .panel-title { display: flex; gap: 12px; align-items: flex-start; }
@@ -1178,22 +678,19 @@ onMounted(async () => {
 .thumb { position: relative; width: 96px; height: 96px; }
 .thumb-img { width: 96px; height: 96px; border-radius: 12px; border: 1px solid var(--ih-line); }
 .file-link {
-  display: flex; width: 96px; height: 96px; border-radius: 12px; align-items: center; justify-content: center;
-  background: var(--ih-soft-2); color: var(--ih-primary); text-decoration: none; font-weight: 600; font-size: 13px;
+  display: flex; width: 96px; height: 96px; border-radius: 12px;
+  align-items: center; justify-content: center;
+  background: var(--ih-soft-2); color: var(--ih-primary);
+  text-decoration: none; font-weight: 600; font-size: 13px;
 }
 .thumb-del {
   position: absolute; top: -6px; right: -6px; width: 20px; height: 20px; border-radius: 50%;
-  border: none; background: rgba(16, 24, 40, 0.7); color: #fff; font-size: 12px; line-height: 20px;
-  cursor: pointer;
+  border: none; background: rgba(16, 24, 40, 0.7); color: #fff;
+  font-size: 12px; line-height: 20px; cursor: pointer;
 }
+html.dark .thumb-del { background: rgba(255, 255, 255, 0.9); color: #101828; }
 
-/* 定性 */
-.state-chip {
-  display: inline-flex; align-items: center; gap: 10px;
-  padding: 6px 12px; border-radius: 999px; font-size: 12px; margin-bottom: 12px;
-}
-.state-chip.is-done { background: var(--ih-success-soft); color: var(--ih-success-ink); }
-.state-chip.is-todo { background: var(--ih-warn-soft); color: var(--ih-warn-ink); }
+/* 定性表单 */
 .qualify-form :deep(.el-form-item) { margin-bottom: 12px; }
 .qualify-form :deep(.el-form-item__label) { padding-bottom: 2px; font-size: 12px; color: var(--ih-sub); }
 .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
@@ -1201,8 +698,8 @@ onMounted(async () => {
 /* 定级 */
 .triage-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
 .triage-cell {
-  background: var(--ih-soft); border: 1px solid var(--ih-line); border-radius: 12px; padding: 10px 12px;
-  display: flex; flex-direction: column; gap: 6px;
+  background: var(--ih-soft); border: 1px solid var(--ih-line); border-radius: 12px;
+  padding: 10px 12px; display: flex; flex-direction: column; gap: 6px;
 }
 .triage-label { font-size: 12px; color: var(--ih-sub); }
 .triage-detail { margin-top: 14px; display: flex; flex-direction: column; gap: 10px; }
@@ -1210,18 +707,8 @@ onMounted(async () => {
 .reason-box h3 { margin: 0 0 6px; font-size: 13px; color: var(--ih-ink); }
 .reason-box ul { margin: 0; padding-left: 18px; font-size: 13px; color: var(--ih-sub); line-height: 1.7; }
 .reason-box--warn { background: var(--ih-warn-soft); }
+.reason-box--warn h3, .reason-box--warn ul { color: var(--ih-warn-ink); }
 .triage-meta { display: flex; gap: 16px; font-size: 12px; color: var(--ih-sub); flex-wrap: wrap; }
-
-/* 修复方案 */
-.notice {
-  padding: 10px 12px; border-radius: 12px; background: var(--ih-warn-soft); color: var(--ih-warn-ink);
-  font-size: 12px; margin-bottom: 12px;
-}
-.fix-plan { display: flex; flex-direction: column; gap: 10px; }
-.fix-row { display: grid; grid-template-columns: 84px 1fr; gap: 10px; font-size: 13px; }
-.fix-k { color: var(--ih-sub); }
-.fix-v ul { margin: 0; padding-left: 18px; line-height: 1.7; }
-.fix-v code { display: block; background: var(--ih-soft-2); padding: 2px 8px; border-radius: 6px; margin: 2px 0; font-size: 12px; }
 
 /* 时间线 */
 .timeline { padding-left: 4px; }
@@ -1229,222 +716,31 @@ onMounted(async () => {
 .event-type { font-weight: 600; color: var(--ih-ink); }
 .event-note { color: var(--ih-sub); font-size: 12px; }
 
-/* ---------- ③ 代码范围 / worktree ---------- */
-.field-block { margin-bottom: 14px; }
-.field-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 8px; flex-wrap: wrap; }
-.field-title { font-size: 13px; font-weight: 600; color: var(--ih-ink); }
-.scope-list { display: flex; flex-wrap: wrap; gap: 8px; }
-.scope-chip {
-  display: inline-flex; align-items: center; gap: 6px;
-  padding: 6px 12px; border-radius: 999px; font-size: 13px;
-  border: 1px solid var(--ih-line); background: var(--ih-card);
-  color: var(--ih-sub); cursor: pointer; transition: all 0.16s ease;
+/* ---------- 手机 ---------- */
+.wb-fab {
+  position: fixed; right: 16px; bottom: calc(72px + env(safe-area-inset-bottom)); z-index: 40;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px;
+  width: 62px; height: 62px; border: none; border-radius: 50%;
+  background: linear-gradient(135deg, var(--ih-primary), var(--ih-primary-2));
+  color: #fff; box-shadow: 0 10px 24px rgba(79, 70, 229, 0.4); cursor: pointer;
 }
-.scope-chip:hover { border-color: var(--ih-line-strong); }
-.scope-chip.is-on {
-  border-color: var(--el-color-primary); background: var(--el-color-primary-light-9);
-  color: var(--el-color-primary); font-weight: 600;
+.wb-fab:active { transform: scale(0.95); }
+.wb-fab-icon { font-size: 15px; font-weight: 700; }
+.wb-fab-text { font-size: 10px; }
+.wb-fab-badge {
+  position: absolute; top: -4px; right: -8px;
+  padding: 1px 6px; border-radius: 999px; font-size: 10px; font-weight: 600;
+  background: #fff; color: var(--ih-primary); box-shadow: 0 2px 6px rgba(0, 0, 0, 0.15);
 }
-.scope-chip.is-missing { opacity: 0.55; }
-
-/* ---------- 分析流程图（折叠） ---------- */
-.flow-collapse {
-  margin: 4px 0 18px;
-  border: 1px solid var(--ih-line);
-  border-radius: 12px;
-  background: var(--ih-soft);
-  overflow: hidden;
-}
-.flow-collapse :deep(.el-collapse-item__header) {
-  padding: 0 16px;
-  height: 46px;
-  background: transparent;
-  border-bottom: none;
-  gap: 10px;
-}
-/* 标题与说明之间留出间隔，避免贴在一起 */
-.flow-collapse :deep(.el-collapse-item__title) {
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
-}
-.flow-collapse :deep(.el-collapse-item__wrap) {
-  background: var(--ih-card);
-  border-top: 1px solid var(--ih-line);
-}
-.flow-collapse :deep(.el-collapse-item__content) { padding: 16px; }
-.flow-title { font-weight: 600; font-size: 13.5px; }
-.flow-hint { font-size: 12px; }
-.scope-badge {
-  font-size: 10px; padding: 0 5px; border-radius: 6px;
-  background: var(--ih-soft-2); color: var(--ih-sub);
-}
-.scope-chip.is-on .scope-badge { background: var(--ih-primary-soft); color: var(--el-color-primary); }
-.scope-badge--warn { background: var(--ih-warn-soft); color: var(--ih-warn-ink); }
-.repo-select { width: 100%; max-width: 460px; }
-.repo-hint { margin-left: 10px; font-size: 12px; color: var(--ih-sub); }
-.fix-empty { padding: 6px 0 2px; }
-.apply-hint {
-  padding: 8px 12px; border-radius: 10px; font-size: 12px; line-height: 1.6;
-  background: var(--ih-warn-soft); color: var(--ih-warn-ink); margin-bottom: 12px;
-}
-
-/* ---------- 目标仓库下拉 + 一致性提示 ---------- */
-.infer-btn { margin-left: auto; padding: 0; height: auto; font-size: 12px; }
-.repo-opt { display: flex; align-items: baseline; gap: 8px; }
-.repo-opt-name { font-weight: 600; }
-.repo-opt-path { color: var(--ih-sub); font-size: 11.5px; }
-.repo-opt-covers { color: var(--ih-sub); font-size: 11px; margin-top: 1px; }
-
-.repo-detail { margin-top: 8px; display: flex; flex-direction: column; gap: 4px; }
-.repo-detail-row code {
-  font-size: 11.5px; color: var(--ih-sub);
-  background: var(--ih-soft); border: 1px solid var(--ih-line);
-  border-radius: 6px; padding: 2px 8px; display: inline-block;
-  word-break: break-all;
-}
-
-/* ---------- 上下文文件 ---------- */
-.ctx-collapse { margin-bottom: 14px; }
-.ctx-body { display: flex; flex-direction: column; gap: 10px; }
-.ctx-toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.ctx-path { font-size: 11.5px; flex: 1; min-width: 180px; word-break: break-all; }
-.ctx-input :deep(textarea) {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 12px; line-height: 1.65;
-}
-.ctx-hint { font-size: 11.5px; }
-
-/* ---------- 按仓库分组的 worktree ---------- */
-.repo-card {
-  border: 1px solid var(--ih-line); border-radius: 12px;
-  padding: 14px 16px; margin-bottom: 12px; background: var(--ih-soft);
-}
-.repo-card-head {
+.wb-fab-badge.is-warn { background: #f79009; color: #fff; }
+.wb-drawer :deep(.el-drawer__body) { padding: 0; display: flex; flex-direction: column; }
+.wb-drawer-bar {
   display: flex; justify-content: space-between; align-items: center;
-  gap: 10px; flex-wrap: wrap; margin-bottom: 6px;
+  padding: 12px 16px; border-bottom: 1px solid var(--ih-line);
+  font-size: 14px; font-weight: 600; color: var(--ih-ink);
 }
-.repo-card-title { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
-.repo-card-path { font-size: 11px; color: var(--ih-sub); word-break: break-all; }
-.repo-card-status {
-  font-size: 11px; padding: 1px 8px; border-radius: 999px;
-  background: var(--ih-soft-2); color: var(--ih-sub);
-}
-.repo-card-status.is-changed { background: var(--ih-success-soft); color: var(--ih-success-ink); }
-.repo-card-status.is-failed { background: var(--ih-warn-soft); color: var(--ih-warn-ink); }
-.repo-card-meta { display: flex; gap: 8px; align-items: center; font-size: 11.5px; flex-wrap: wrap; margin-bottom: 8px; }
-.repo-card-meta code { font-size: 11.5px; }
-.repo-card-actions { display: flex; gap: 6px; flex-shrink: 0; }
-.repo-error {
-  background: var(--ih-warn-soft); color: var(--ih-warn-ink);
-  border-radius: 8px; padding: 10px 12px; font-size: 12.5px; line-height: 1.6;
-  margin-bottom: 8px; word-break: break-word;
-}
-.repo-error b { display: block; margin-bottom: 4px; }
-.repo-summary {
-  margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--ih-line);
-  font-size: 12.5px; color: var(--ih-sub); white-space: pre-wrap; line-height: 1.65;
-}
-
-/* ---------- 修改轮次 ---------- */
-.attempts { margin-top: 4px; }
-.attempts-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
-.attempts-title { font-weight: 700; font-size: 13.5px; }
-.attempts-sub { font-size: 12px; }
-.attempts-badge { margin-left: auto; }
-.attempts-collapse {
-  border: 1px solid var(--ih-line); border-radius: 12px; overflow: hidden;
-  background: var(--ih-card);
-}
-.attempts-collapse :deep(.el-collapse-item__header) {
-  padding: 0 14px; height: 44px; background: transparent; border-bottom-color: var(--ih-line);
-}
-.attempts-collapse :deep(.el-collapse-item__wrap) {
-  background: transparent; border-bottom-color: var(--ih-line);
-}
-.attempts-collapse :deep(.el-collapse-item__content) { padding: 14px 16px; }
-.attempt-title { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; min-width: 0; }
-.attempt-seq { font-weight: 700; font-size: 13px; }
-.attempt-status {
-  font-size: 11px; padding: 1px 8px; border-radius: 999px;
-  background: var(--ih-soft-2); color: var(--ih-sub);
-}
-.attempt-status.is-changed { background: var(--ih-success-soft); color: var(--ih-success-ink); }
-.attempt-status.is-failed { background: var(--ih-warn-soft); color: var(--ih-warn-ink); }
-.attempt-status.is-partial { background: var(--ih-warn-soft); color: var(--ih-warn-ink); }
-.attempt-flag {
-  font-size: 11px; padding: 1px 8px; border-radius: 999px;
-  background: var(--ih-warn-soft); color: var(--ih-warn-ink); font-weight: 600;
-}
-.attempt-files, .attempt-time { font-size: 11.5px; }
-.attempt-body { display: flex; flex-direction: column; gap: 12px; }
-.attempt-sec { font-size: 12.5px; line-height: 1.65; }
-.attempt-sec-title {
-  font-size: 11.5px; font-weight: 700; letter-spacing: 0.05em;
-  color: var(--ih-sub); margin-bottom: 4px;
-}
-.attempt-sec-text { color: var(--ih-ink); white-space: pre-wrap; word-break: break-word; }
-.attempt-sec ul { margin: 0; padding-left: 18px; }
-.attempt-sec--warn {
-  background: var(--ih-warn-soft); color: var(--ih-warn-ink);
-  border-left: 3px solid var(--el-color-warning);
-  border-radius: 0 10px 10px 0; padding: 10px 14px;
-}
-.attempt-sec--warn .attempt-sec-title { color: var(--ih-warn-ink); }
-.attempt-sec--info {
-  background: var(--ih-primary-soft);
-  border-left: 3px solid var(--el-color-primary);
-  border-radius: 0 10px 10px 0; padding: 10px 14px;
-}
-.attempt-file {
-  display: inline-block; margin: 2px 6px 2px 0; padding: 1px 7px;
-  border-radius: 5px; background: var(--ih-soft); border: 1px solid var(--ih-line);
-  font-size: 11.5px; word-break: break-all;
-}
-.attempt-summary { color: var(--ih-sub); }
-.attempt-repos { border-top: 1px dashed var(--ih-line); padding-top: 10px; display: flex; flex-direction: column; gap: 5px; }
-.attempt-repo-row { display: flex; align-items: center; gap: 8px; font-size: 12px; flex-wrap: wrap; }
-.attempt-repo-status {
-  font-size: 11px; padding: 1px 7px; border-radius: 999px;
-  background: var(--ih-soft-2); color: var(--ih-sub);
-}
-.attempt-repo-status.is-changed { background: var(--ih-success-soft); color: var(--ih-success-ink); }
-.attempt-repo-status.is-failed { background: var(--ih-warn-soft); color: var(--ih-warn-ink); }
-.attempt-repo-err { color: var(--ih-warn-ink); font-size: 11.5px; word-break: break-all; }
-
-.scope-warn {
-  padding: 12px 14px; border-radius: 10px; margin-bottom: 12px;
-  background: var(--ih-warn-soft); color: var(--ih-warn-ink);
-  font-size: 12.5px; line-height: 1.65;
-  border-left: 3px solid var(--el-color-warning);
-}
-.scope-warn b { display: block; margin-bottom: 4px; }
-.scope-warn-body code {
-  display: inline-block; margin: 2px 6px 2px 0; padding: 1px 7px;
-  border-radius: 5px; background: var(--ih-card); border: 1px solid var(--ih-line);
-  font-size: 11.5px; word-break: break-all;
-}
-.scope-warn-tip { margin-top: 6px; opacity: 0.9; }
-
-.worktree { margin-top: 14px; border-top: 1px dashed var(--ih-line); padding-top: 14px; }
-.wt-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
-.wt-meta { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--ih-sub); flex-wrap: wrap; }
-.wt-tag { padding: 1px 8px; border-radius: 999px; background: var(--ih-soft-2); color: var(--ih-sub); font-size: 11px; }
-.accepted-box {
-  display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
-  padding: 10px 12px; border-radius: 12px; font-size: 13px; margin-bottom: 10px;
-  background: var(--ih-success-soft); color: var(--ih-success-ink);
-}
-.diff-stat { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--ih-sub); white-space: pre-wrap; margin-bottom: 8px; }
-.diff-view {
-  max-height: 380px; overflow: auto; margin: 0; padding: 10px 12px;
-  background: var(--ih-soft); border: 1px solid var(--ih-line); border-radius: 12px;
-}
-.diff-view code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; line-height: 1.6; white-space: pre; }
-.dl-add { display: block; color: #12b76a; }
-.dl-del { display: block; color: #f04438; }
-.dl-hunk { display: block; color: #7c3aed; }
-.dl-meta { display: block; color: var(--ih-sub); }
+.wb-drawer-title { font-size: 14px; font-weight: 600; }
+.wb-drawer-body { flex: 1; min-height: 0; overflow-y: auto; padding: 12px; }
 
 @media (max-width: 768px) {
   .hero { padding: 16px; }
@@ -1455,7 +751,5 @@ onMounted(async () => {
   .panel { padding: 14px; }
   .triage-grid { grid-template-columns: 1fr; }
   .two-col { grid-template-columns: 1fr; }
-  .fix-row { grid-template-columns: 1fr; gap: 2px; }
-  .thumbs { gap: 8px; }
 }
 </style>

@@ -27,6 +27,8 @@ class IssuePatch(BaseModel):
     code_scopes: Optional[list[str]] = None
     # 改代码用的 git 仓库（可多个）
     target_repos: Optional[list[str]] = None
+    # 所属项目：0 或 null 表示取消归属
+    project_id: Optional[int] = None
     # 兼容旧字段：单个仓库，写入时会合并进 target_repos
     target_repo: Optional[str] = None
 
