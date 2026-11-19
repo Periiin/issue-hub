@@ -85,9 +85,42 @@ def get_issue(issue_id: int):
             "FROM ai_run WHERE issue_id = ? ORDER BY id DESC LIMIT 20", (issue_id,)).fetchall())
         events = list_rows(conn.execute(
             "SELECT * FROM event WHERE issue_id = ? ORDER BY id DESC", (issue_id,)).fetchall())
-    for key in ("qualify_draft", "qualify_final", "triage", "fix_plan"):
+    for key in ("qualify_draft", "qualify_final", "triage", "fix_plan",
+                "code_scopes", "target_repos", "fix_state"):
         issue[key] = _json_or_none(issue.get(key))
-    return {"issue": issue, "attachments": attachments, "runs": runs, "events": events}
+    # 兼容前端：target_repos 为空时回退到旧的单值字段
+    if not issue.get("target_repos") and issue.get("target_repo"):
+        issue["target_repos"] = [issue["target_repo"]]
+    from ..fix import list_attempts
+    # 所属项目一起返回：前端直接用，不必再拉一次项目列表
+    project = None
+    if issue.get("project_id"):
+        from .. import projects as proj
+        project = proj.get_project(issue["project_id"])
+    return {"issue": issue, "project": project, "attachments": attachments, "runs": runs,
+            "events": events, "attempts": list_attempts(issue_id)}
+
+
+@router.get("/{issue_id}/memory")
+def get_memory(issue_id: int):
+    """查看这个问题的对话记忆：每类操作各一份，与通道无关。"""
+    from .. import memory as mem
+    with connect() as conn:
+        _load_issue(conn, issue_id)
+    sessions = mem.list_sessions(issue_id)
+    for s in sessions:
+        s["kindLabel"] = mem.KIND_LABELS.get(s["kind"], s["kind"])
+    return {"sessions": sessions, "kinds": mem.KIND_LABELS}
+
+
+@router.delete("/{issue_id}/memory")
+def clear_memory(issue_id: int, kind: str = ""):
+    """清空记忆。kind 为空清全部；否则只清某一类（如只清「改代码」的）。"""
+    from .. import memory as mem
+    with connect() as conn:
+        _load_issue(conn, issue_id)
+    n = mem.clear_session(issue_id, kind or None)
+    return {"ok": True, "cleared": n}
 
 
 @router.patch("/{issue_id}")
@@ -95,6 +128,21 @@ def patch_issue(issue_id: int, payload: IssuePatch):
     data = payload.model_dump(exclude_none=True)
     if "status" in data and not valid_status(data["status"]):
         raise HTTPException(400, f"非法状态：{data['status']}")
+    if "code_scopes" in data:
+        data["code_scopes"] = json.dumps(data["code_scopes"], ensure_ascii=False)
+    if "target_repos" in data:
+        data["target_repos"] = json.dumps(data["target_repos"], ensure_ascii=False)
+    # project_id=0 表示取消归属（前端 clearable 传 0）
+    if "project_id" in data:
+        data["project_id"] = data["project_id"] or None
+    if "target_repo" in data and data["target_repo"]:
+        from ..fix import is_repo_root
+        if not is_repo_root(data["target_repo"]):
+            raise HTTPException(400, "target_repo 必须是 git 仓库根目录")
+    # 兼容：只传了旧字段 target_repo 时，同步进 target_repos，保证新逻辑能读到
+    if "target_repo" in data and "target_repos" not in data:
+        data["target_repos"] = json.dumps(
+            [data["target_repo"]] if data["target_repo"] else [], ensure_ascii=False)
     if not data:
         return {"ok": True}
     data["updated_at"] = now()

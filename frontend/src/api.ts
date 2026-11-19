@@ -17,6 +17,8 @@ export interface Issue {
   complexity: string | null
   priority: string | null
   fix_plan: any
+  /** 所属项目（决定默认代码范围与可改仓库） */
+  project_id?: number | null
   created_at: string
   updated_at: string
 }
@@ -54,17 +56,17 @@ export const uploadAttachments = (id: number, files: File[]) => {
 export const deleteAttachment = (issueId: number, attachmentId: number) =>
   api.delete(`/issues/${issueId}/attachments/${attachmentId}`).then((r) => r.data)
 
-export const runQualify = (id: number, provider?: string) =>
-  api.post(`/issues/${id}/qualify`, { provider }).then((r) => r.data)
+export const runQualify = (id: number, channelId?: number | null) =>
+  api.post(`/issues/${id}/qualify`, { channel_id: channelId }).then((r) => r.data)
 
 export const confirmQualify = (id: number, data: Record<string, any>) =>
   api.post(`/issues/${id}/qualify/confirm`, data).then((r) => r.data)
 
-export const runTriage = (id: number, provider?: string) =>
-  api.post(`/issues/${id}/triage`, { provider }).then((r) => r.data)
+export const runTriage = (id: number, channelId?: number | null) =>
+  api.post(`/issues/${id}/triage`, { channel_id: channelId }).then((r) => r.data)
 
-export const runFix = (id: number, provider?: string) =>
-  api.post(`/issues/${id}/fix`, { provider }).then((r) => r.data)
+export const runFix = (id: number, channelId?: number | null) =>
+  api.post(`/issues/${id}/fix`, { channel_id: channelId }).then((r) => r.data)
 
 export const getSettings = () => api.get('/settings').then((r) => r.data)
 
@@ -72,3 +74,205 @@ export const saveSettings = (values: Record<string, any>) =>
   api.put('/settings', { values }).then((r) => r.data)
 
 export const fileUrl = (path: string) => `/files/${path}`
+
+// ---------- 操作解决（worktree） ----------
+
+export interface CodeRoot {
+  path: string
+  name: string
+  exists: boolean
+  isGit: boolean
+  repoRoot: string | null
+}
+
+/** 可做 worktree 的 git 仓库根（后端按 repoRoot 去重） */
+export interface TargetRepo {
+  path: string
+  name: string
+  exists: boolean
+  isGit: boolean
+  /** 该仓库覆盖的、已配置为代码范围的子目录 */
+  covers: string[]
+}
+
+export const getCodeRoots = (projectId?: number | null) =>
+  api.get<{ roots: CodeRoot[]; ignore: string[]; projectNotes: string; targetRepos: TargetRepo[] }>(
+    '/code/roots', { params: projectId ? { project_id: projectId } : {} }
+  ).then((r) => r.data)
+
+/** 单个仓库的 worktree 状态（多仓库时 fix_state.repos 的每个值） */
+export interface RepoFixState {
+  repo: string
+  name?: string
+  worktree?: string
+  branch?: string
+  base_branch?: string
+  base_commit?: string
+  status?: 'changed' | 'unchanged' | 'failed'
+  error?: string
+  provider?: string
+  duration_ms?: number
+  summary?: string
+  diff_stat?: string
+  files?: string[]
+  accepted?: boolean
+  accepted_at?: string
+  commit_message?: string
+  merge?: { merged?: boolean; base_branch?: string; reason?: string; command?: string }
+  updated_at?: string
+}
+
+export interface FixState {
+  repos: Record<string, RepoFixState>
+  context?: string
+  updated_at?: string
+}
+
+export const applyFix = (id: number, data: { channel_id?: number | null; repos?: string[]; message?: string }) =>
+  api.post<{ state: FixState; diffs: Record<string, any>; context: string }>(`/issues/${id}/fix/apply`, data)
+    .then((r) => r.data)
+
+export const getFixDiff = (id: number, repo?: string) =>
+  api.get<{ state: FixState; diffs: Record<string, any> }>(`/issues/${id}/fix/diff`, { params: repo ? { repo } : {} })
+    .then((r) => r.data)
+
+export const acceptFix = (id: number, data: { repo?: string; message?: string; merge?: boolean }) =>
+  api.post<{ ok: boolean; results: Record<string, any>; state: FixState }>(`/issues/${id}/fix/accept`, data)
+    .then((r) => r.data)
+
+export const rejectFix = (id: number, data: { repo?: string } = {}) =>
+  api.post(`/issues/${id}/fix/reject`, data).then((r) => r.data)
+
+// ---------- 修复上下文（边界文件） ----------
+
+export const getFixContext = (id: number) =>
+  api.get<{ text: string; path: string }>(`/issues/${id}/context`).then((r) => r.data)
+
+export const saveFixContext = (id: number, text: string) =>
+  api.put<{ ok: boolean; path: string }>(`/issues/${id}/context`, { text }).then((r) => r.data)
+
+export const regenerateFixContext = (id: number) =>
+  api.post<{ ok: boolean; text: string; path: string }>(`/issues/${id}/context/regenerate`).then((r) => r.data)
+
+/** 一轮「开始修改」的归档：实际改的过程与方案的出入 */
+export interface FixAttempt {
+  seq: number
+  provider?: string
+  status?: 'changed' | 'unchanged' | 'failed' | 'partial'
+  summary?: string
+  actual_root_cause?: string
+  deviations?: string[]
+  found_issues?: string[]
+  files?: string[]
+  risks?: string[]
+  verification?: string
+  repos?: Record<string, { status?: string; error?: string; summary?: string; files?: string[]; deviations?: string[]; found_issues?: string[] }>
+  created_at?: string
+}
+
+// ---------- 项目 ----------
+
+export interface Project {
+  id: number
+  name: string
+  repos: string[]
+  notes?: string
+  ignored?: boolean
+}
+
+export interface ScanResult {
+  roots: string[]
+  scanned: number
+  repos: { path: string; name: string; parent: string; root: string; depth: number }[]
+  clusters: { key: string; name: string; repos: string[]; depth: number }[]
+  created: { id: number; name: string; repos: string[] }[]
+  suggestions: {
+    reason: string
+    projects: { name: string; key: string; repos: string[] }[]
+    mergedName: string
+    mergedRepos: string[]
+  }[]
+  projects: Project[]
+  hint?: string
+}
+
+export const getProjects = () =>
+  api.get<{ projects: Project[] }>('/projects').then((r) => r.data)
+
+export const createProject = (data: { name: string; repos: string[]; notes?: string }) =>
+  api.post<{ id: number; project: Project }>('/projects', data).then((r) => r.data)
+
+export const updateProject = (id: number, data: Partial<Project>) =>
+  api.patch<{ project: Project }>(`/projects/${id}`, data).then((r) => r.data)
+
+export const deleteProject = (id: number) =>
+  api.delete(`/projects/${id}`).then((r) => r.data)
+
+export const mergeProjects = (target_id: number, source_id: number, name?: string) =>
+  api.post<{ project: Project }>('/projects/merge', { target_id, source_id, name }).then((r) => r.data)
+
+/** dry=true 只扫描不入库；dry=false 会把新候选项目写进库 */
+export const scanRepos = (dry = true) =>
+  api.get<ScanResult>('/code/scan', { params: { dry } }).then((r) => r.data)
+
+// ---------- AI 通道 ----------
+
+export interface Channel {
+  id: number
+  name: string
+  kind: 'api' | 'agent' | 'mock'
+  base_url?: string
+  model?: string
+  command?: string
+  args?: string
+  temperature?: number
+  max_rounds?: number
+  enabled: boolean
+  hasKey: boolean
+}
+
+export const getChannels = () =>
+  api.get<{ channels: Channel[] }>('/channels').then((r) => r.data)
+
+export const createChannel = (data: Partial<Channel> & { api_key?: string }) =>
+  api.post<{ id: number }>('/channels', data).then((r) => r.data)
+
+export const updateChannel = (id: number, data: Partial<Channel> & { api_key?: string }) =>
+  api.patch(`/channels/${id}`, data).then((r) => r.data)
+
+export const deleteChannel = (id: number) =>
+  api.delete(`/channels/${id}`).then((r) => r.data)
+
+export const listChannelModels = (data: { base_url: string; api_key?: string; channel_id?: number }) =>
+  api.post<{ models: string[] }>('/channels/models', data).then((r) => r.data)
+
+export const testChannel = (id: number) =>
+  api.post<{ ok: boolean; model: string; reply: string; durationMs: number }>(
+    `/channels/${id}/test`, {}, { timeout: 180000 }
+  ).then((r) => r.data)
+
+// ---------- 对话记忆 ----------
+
+export interface MemorySession {
+  id: number
+  kind: string
+  kindLabel: string
+  rounds: number
+  turns: number
+  tokens: number
+  created_at: string
+  updated_at: string
+}
+
+export const getMemory = (issueId: number) =>
+  api.get<{ sessions: MemorySession[]; kinds: Record<string, string> }>(`/issues/${issueId}/memory`)
+    .then((r) => r.data)
+
+/** kind 为空表示清空全部 */
+export const clearMemory = (issueId: number, kind = '') =>
+  api.delete(`/issues/${issueId}/memory`, { params: kind ? { kind } : {} }).then((r) => r.data)
+
+/** 只跑验证不提交：先看看能不能编译 */
+export const verifyFix = (id: number, repo = '') =>
+  api.post(`/issues/${id}/fix/verify`, {}, { params: repo ? { repo } : {}, timeout: 600000 })
+    .then((r) => r.data)

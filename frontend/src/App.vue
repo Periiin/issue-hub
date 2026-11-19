@@ -119,7 +119,9 @@ const goCreate = () => router.push({ path: '/issues', query: { new: '1' } })
 .theme-btn:hover { color: var(--ih-primary); border-color: var(--ih-primary); transform: rotate(8deg); }
 .theme-btn:active { transform: scale(0.94); }
 
-.content { max-width: 1120px; margin: 0 auto; padding: 20px; }
+.content { max-width: 1400px; margin: 0 auto; padding: 20px; }
+/* 列表页内容比详情页窄，单独收一下，避免表格被拉得过长 */
+.content:has(.list-page) { max-width: 1180px; }
 
 /* ---------- 手机底部导航 ---------- */
 .tabbar {

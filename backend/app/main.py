@@ -13,7 +13,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .config import ATTACH_DIR, FRONTEND_DIST
 from .db import init_db
-from .routers import ai, issues, report, settings
+from .routers import ai, channels, fix, issues, projects, report, settings
 
 app = FastAPI(title="Issue Hub", version="0.1.0")
 
@@ -26,6 +26,9 @@ app.add_middleware(
 
 app.include_router(issues.router)
 app.include_router(ai.router)
+app.include_router(fix.router)
+app.include_router(projects.router)
+app.include_router(channels.router)
 app.include_router(report.router)
 app.include_router(settings.router)
 
@@ -48,10 +51,25 @@ if (FRONTEND_DIST / "assets").exists():
     app.mount("/assets", StaticFiles(directory=str(FRONTEND_DIST / "assets")), name="assets")
 
 
+# PWA 静态文件：manifest / service worker / 图标。
+# 这几个必须在 SPA 兜底路由之前，否则会被 index.html 顶掉。
+_PWA_FILES = {
+    "manifest.webmanifest": "application/manifest+json",
+    "sw.js": "application/javascript",
+    "icon-192.png": "image/png",
+    "icon-512.png": "image/png",
+    "favicon.ico": "image/x-icon",
+}
+
+
 @app.get("/{path:path}")
 def spa(path: str):
     if path.startswith("api/"):
         return JSONResponse({"detail": "Not Found"}, status_code=404)
+    if path in _PWA_FILES:
+        f = FRONTEND_DIST / path
+        if f.is_file():
+            return FileResponse(f, media_type=_PWA_FILES[path])
     index = FRONTEND_DIST / "index.html"
     if index.exists():
         return FileResponse(index)

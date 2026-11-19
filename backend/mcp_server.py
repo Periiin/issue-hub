@@ -16,6 +16,16 @@
   }
 }
 
+工具（22 个）：
+  问题     list_issues / get_issue / create_issue / update_issue / add_note
+  AI      run_qualify / confirm_qualify / run_triage / make_fix_plan
+  修复    verify_fix / accept_fix / reject_fix / get_fix_diff / get_fix_attempts / get_fix_context
+  记忆    get_memory / clear_memory
+  配置    list_channels / test_channel / list_projects / list_code_roots
+  报表    weekly_report
+
+与 Web 端行为一致：同一套记忆、同一套图片识别、采纳前同样强制验证。
+
 调试：
   printf '%s\\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}' \
                 '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
@@ -34,12 +44,21 @@ from app.config import ALL_STATUS, ATTACH_DIR, COMPLEXITIES, PRIORITIES, SEVERIT
 from app.db import add_event, connect, get_settings, init_db, list_rows, now, valid_status  # noqa: E402
 from app.prompts import (FIX_SYSTEM, QUALIFY_SYSTEM, TRIAGE_SYSTEM, build_fix_prompt,  # noqa: E402
                          build_qualify_prompt, build_triage_prompt, extract_json)
-from app.providers import AIError, run_ai  # noqa: E402
+from app.channels import AIError, run_ai  # noqa: E402
+from app import memory as mem  # noqa: E402
 
 mcp = FastMCP("issue-hub")
 
 
 # ---------- 内部工具 ----------
+
+def _issue_images(issue_id: int) -> list[str]:
+    """附件图片绝对路径；vision 层会过滤非图片/超大/读失败的。"""
+    with connect() as conn:
+        rows = conn.execute("SELECT path FROM attachment WHERE issue_id = ?",
+                            (issue_id,)).fetchall()
+    return [str(ATTACH_DIR / r["path"]) for r in rows]
+
 
 def _issue(issue_id: int) -> dict | None:
     with connect() as conn:
@@ -172,8 +191,8 @@ def add_note(issue_id: int, note: str) -> dict:
 
 
 @mcp.tool()
-def run_qualify(issue_id: int, provider: str = "") -> dict:
-    """跑 AI 定性，返回结构化草稿（不落库为最终值，需要人工确认）。provider 可空=mock。"""
+def run_qualify(issue_id: int, channel_id: int = 0) -> dict:
+    """跑 AI 定性，返回结构化草稿（不落库为最终值，需要人工确认）。channel_id 传 0 用默认通道。"""
     row = _issue(issue_id)
     if not row:
         return {"error": f"问题 #{issue_id} 不存在"}
@@ -182,7 +201,11 @@ def run_qualify(issue_id: int, provider: str = "") -> dict:
             "SELECT path FROM attachment WHERE issue_id = ?", (issue_id,)).fetchall()]
     prompt = build_qualify_prompt(row, paths)
     try:
-        result = run_ai(provider, prompt, QUALIFY_SYSTEM)
+        # 与 Web 端同一套记忆与图片：MCP 不是「另一个入口」，行为必须一致
+        block = mem.build_memory_block(row, current_kind="qualify")
+        result = run_ai(channel_id or None, prompt, QUALIFY_SYSTEM,
+                        issue_id=issue_id, kind="qualify", memory_block=block,
+                        images=paths)
         data = extract_json(result.text)
     except (AIError, ValueError) as ex:
         return {"error": str(ex)}
@@ -225,7 +248,7 @@ def confirm_qualify(issue_id: int, phenomenon: str, title: str = "",
 
 
 @mcp.tool()
-def run_triage(issue_id: int, provider: str = "") -> dict:
+def run_triage(issue_id: int, channel_id: int = 0) -> dict:
     """基于已确认描述跑 AI 定级，返回 S/复杂度/P 并写回问题（状态变「待处理」）。"""
     row = _issue(issue_id)
     if not row:
@@ -234,7 +257,10 @@ def run_triage(issue_id: int, provider: str = "") -> dict:
         return {"error": "还没确认过定性，先 confirm_qualify"}
     confirmed = json.loads(row["qualify_final"])
     try:
-        result = run_ai(provider, build_triage_prompt(confirmed), TRIAGE_SYSTEM)
+        block = mem.build_memory_block(row, current_kind="triage")
+        result = run_ai(channel_id or None, build_triage_prompt(confirmed), TRIAGE_SYSTEM,
+                        issue_id=issue_id, kind="triage", memory_block=block,
+                        images=_issue_images(issue_id))
         data = extract_json(result.text)
     except (AIError, ValueError) as ex:
         return {"error": str(ex)}
@@ -253,7 +279,7 @@ def run_triage(issue_id: int, provider: str = "") -> dict:
 
 
 @mcp.tool()
-def make_fix_plan(issue_id: int, provider: str = "", code_scope: str = "") -> dict:
+def make_fix_plan(issue_id: int, channel_id: int = 0, code_scope: str = "") -> dict:
     """让 agent 在代码目录里定位根因、给修复方案（只读，不改代码）。
 
     code_scope 为空时用设置里的 repo.root；也可以临时指定一个或多个目录（逗号分隔），
@@ -274,11 +300,15 @@ def make_fix_plan(issue_id: int, provider: str = "", code_scope: str = "") -> di
             cwd = str(Path(*Path(scopes[0]).parts[:len(Path(scopes[0]).parts) - 1]))
         except Exception:
             cwd = root
-    prompt = build_fix_prompt(confirmed, root or "（未配置）")
-    if scopes:
-        prompt += "\n\n【可搜索的代码目录】\n" + "\n".join(f"- {s}" for s in scopes)
+    from app.fix import ignore_list, project_notes
+    prompt = build_fix_prompt(confirmed, scopes or ([root] if root else []),
+                              ignore_list(), project_notes())
     try:
-        result = run_ai(provider, prompt, FIX_SYSTEM, cwd=cwd or None)
+        from app.fix import list_attempts
+        block = mem.build_memory_block(row, list_attempts(issue_id), current_kind="analysis")
+        result = run_ai(channel_id or None, prompt, FIX_SYSTEM, cwd=cwd or None,
+                        issue_id=issue_id, kind="analysis", memory_block=block,
+                        images=_issue_images(issue_id))
         data = extract_json(result.text)
     except (AIError, ValueError) as ex:
         return {"error": str(ex)}
@@ -311,6 +341,249 @@ def weekly_report() -> str:
                          f"　{row['module'] or '-'}　{row['created_at'][:10]}")
         lines.append("")
     return "\n".join(lines)
+
+
+@mcp.tool()
+def list_code_roots() -> dict:
+    """列出设置里配置的代码目录，带 isGit/exists，便于决定分析范围和目标仓库。"""
+    from app.fix import ignore_list, list_code_roots as _roots, project_notes
+    return {"roots": _roots(), "ignore": ignore_list(), "projectNotes": project_notes()}
+
+
+def _norm_state(row: dict) -> dict:
+    """把 fix_state 归一化成 {repos: {path: {...}}}（兼容旧的单仓库结构）。"""
+    state = _parse(row.get("fix_state")) or {}
+    if not isinstance(state, dict):
+        return {"repos": {}}
+    if "repos" in state:
+        return state
+    if state.get("repo"):
+        repo = state["repo"]
+        inner = {k: v for k, v in state.items() if k != "repo"}
+        return {"repos": {repo: {"repo": repo, **inner}}, "context": ""}
+    return {"repos": {}}
+
+
+@mcp.tool()
+def get_fix_diff(issue_id: int) -> dict:
+    """查看某个 issue 各仓库 worktree 的当前 diff（人工改过也会体现）。"""
+    from app.fix import FixError, collect_diff
+    row = _issue(issue_id)
+    if not row:
+        return {"error": f"问题 #{issue_id} 不存在"}
+    state = _norm_state(row)
+    if not state.get("repos"):
+        return {"error": "还没有开始修改（fix_state 为空）"}
+    diffs = {}
+    for repo, st in state["repos"].items():
+        wt = st.get("worktree")
+        if not wt:
+            diffs[repo] = {"error": st.get("error") or "没有 worktree"}
+            continue
+        try:
+            diffs[repo] = collect_diff(wt)
+        except FixError as ex:
+            diffs[repo] = {"error": str(ex)}
+    return {"state": state, "diffs": diffs}
+
+
+@mcp.tool()
+def accept_fix(issue_id: int, repo: str = "", message: str = "", merge: bool = True) -> dict:
+    """采纳 worktree 改动：提交到分支，主仓库干净时 ff 合并。
+
+    多仓库时按仓库独立采纳；repo 传空表示采纳全部已成功的仓库。
+    """
+    from app.fix import FixError, commit_all, merge_to_base
+    row = _issue(issue_id)
+    if not row:
+        return {"error": f"问题 #{issue_id} 不存在"}
+    state = _norm_state(row)
+    repos = state.get("repos") or {}
+    if not repos:
+        return {"error": "还没有开始修改"}
+
+    targets = [repo] if repo else list(repos.keys())
+    results = {}
+    for r in targets:
+        st = repos.get(r)
+        if not st:
+            results[r] = {"ok": False, "error": "不在本次修改范围内"}
+            continue
+        if st.get("accepted"):
+            results[r] = {"ok": True, "already": True}
+            continue
+        if st.get("status") == "failed" or not st.get("worktree"):
+            results[r] = {"ok": False, "error": st.get("error") or "没有可采纳的改动"}
+            continue
+        # 与 Web 端一致：采纳前先验证，失败不提交
+        from app import verify as vfy
+        from app import projects as proj_mod
+        project = proj_mod.get_project(row["project_id"]) if row.get("project_id") else None
+        v = vfy.verify_worktree(st["repo"], st["worktree"], (project or {}).get("verify_cmd") or "")
+        st["verify"] = v
+        if v.get("ok") is False:
+            results[r] = {"ok": False, "error": "验证未通过，已阻止采纳", "verify": v}
+            continue
+
+        msg = message.strip() or f"fix(issue-{issue_id}): {row['title']}"
+        try:
+            if not commit_all(st["worktree"], msg):
+                results[r] = {"ok": False, "error": "worktree 里没有改动"}
+                continue
+        except FixError as ex:
+            results[r] = {"ok": False, "error": str(ex)}
+            continue
+        merge_result = {"merged": False, "reason": "未请求合并"}
+        if merge:
+            try:
+                merge_result = merge_to_base(st["repo"], st["branch"])
+            except FixError as ex:
+                merge_result = {"merged": False, "reason": str(ex),
+                                "command": f"git -C {st['repo']} merge {st['branch']}"}
+        st.update({"accepted": True, "accepted_at": now(),
+                   "commit_message": msg, "merge": merge_result})
+        results[r] = {"ok": True, "merge": merge_result, "verify": v}
+
+    with connect() as conn:
+        conn.execute("UPDATE issue SET fix_state = ?, status = '待验收', updated_at = ? WHERE id = ?",
+                     (json.dumps(state, ensure_ascii=False), now(), issue_id))
+        add_event(conn, issue_id, "fix_accept", from_status=row["status"], to_status="待验收",
+                  note="MCP 采纳")
+    return {"ok": True, "results": results}
+
+
+@mcp.tool()
+def verify_fix(issue_id: int, repo: str = "") -> dict:
+    """只跑编译/类型检查，不提交。采纳时也会自动跑，这里用于提前确认。"""
+    from app import verify as vfy
+    from app import projects as proj_mod
+    row = _issue(issue_id)
+    if not row:
+        return {"error": f"问题 #{issue_id} 不存在"}
+    state = _norm_state(row)
+    repos = state.get("repos") or {}
+    targets = [repo] if repo else [r for r, st in repos.items() if st.get("worktree")]
+    if not targets:
+        return {"error": "还没有可验证的 worktree"}
+    project = proj_mod.get_project(row["project_id"]) if row.get("project_id") else None
+    out = {}
+    for r in targets:
+        st = repos.get(r) or {}
+        if not st.get("worktree"):
+            out[r] = {"ok": False, "error": "没有 worktree"}
+            continue
+        out[r] = vfy.verify_worktree(r, st["worktree"], (project or {}).get("verify_cmd") or "")
+        st["verify"] = out[r]
+        repos[r] = st
+    state["repos"] = repos
+    with connect() as conn:
+        conn.execute("UPDATE issue SET fix_state = ?, updated_at = ? WHERE id = ?",
+                     (json.dumps(state, ensure_ascii=False), now(), issue_id))
+    return {"results": out}
+
+
+@mcp.tool()
+def reject_fix(issue_id: int, repo: str = "") -> dict:
+    """丢弃 worktree 和分支。repo 传空表示全部丢弃。"""
+    from app.fix import drop_all_worktrees
+    row = _issue(issue_id)
+    if not row:
+        return {"error": f"问题 #{issue_id} 不存在"}
+    state = _norm_state(row)
+    repos = state.get("repos") or {}
+    if not repos:
+        return {"ok": True}
+    targets = [repo] if repo else list(repos.keys())
+    if repo and repo not in repos:
+        return {"error": f"{repo} 不在本次修改范围内"}
+    drop_all_worktrees(issue_id, targets)
+    for r in targets:
+        repos.pop(r, None)
+
+    with connect() as conn:
+        if repos:
+            state["repos"] = repos
+            conn.execute("UPDATE issue SET fix_state = ?, updated_at = ? WHERE id = ?",
+                         (json.dumps(state, ensure_ascii=False), now(), issue_id))
+        else:
+            conn.execute("UPDATE issue SET fix_state = NULL, status = '待处理', updated_at = ? WHERE id = ?",
+                         (now(), issue_id))
+        add_event(conn, issue_id, "fix_reject",
+                  note=f"MCP 驳回：{repo or '全部'}")
+    return {"ok": True, "repos": list(repos.keys())}
+
+
+@mcp.tool()
+def get_fix_attempts(issue_id: int) -> dict:
+    """查看某个 issue 的修改轮次：每轮与方案的出入、过程中发现的问题、实际根因、文件改动与风险。"""
+    # 注意从 app.fix 导入：app.routers.fix 会带进 fastapi，MCP venv 里没有
+    from app.fix import list_attempts
+    row = _issue(issue_id)
+    if not row:
+        return {"error": f"问题 #{issue_id} 不存在"}
+    return {"attempts": list_attempts(issue_id)}
+
+
+@mcp.tool()
+def get_fix_context(issue_id: int) -> dict:
+    """读取该 issue 的「修复边界」上下文文件（用户可编辑，会喂给改代码的 agent）。"""
+    from app import context as ctx
+    row = _issue(issue_id)
+    if not row:
+        return {"error": f"问题 #{issue_id} 不存在"}
+    text = ctx.read(issue_id)
+    if not text:
+        scopes = _parse(row.get("code_scopes")) or []
+        repos = _parse(row.get("target_repos")) or ([row["target_repo"]] if row.get("target_repo") else [])
+        text = ctx.ensure(issue_id, row, [{"path": r, "name": r.split("\\")[-1].split("/")[-1]} for r in repos],
+                          scopes, get_settings().get("code.project_notes") or "")
+    return {"text": text, "path": str(ctx.context_path(issue_id))}
+
+
+@mcp.tool()
+def list_channels() -> dict:
+    """列出 AI 通道（名称/类型/模型/是否配 Key），用于确认当前有哪些可用。"""
+    from app import channels as ch
+    return {"channels": ch.list_channels()}
+
+
+@mcp.tool()
+def test_channel(channel_id: int) -> dict:
+    """测试通道连通性（会真的发一次请求）。"""
+    from app import channels as ch
+    try:
+        return ch.test_channel(channel_id)
+    except ch.AIError as ex:
+        return {"error": str(ex)}
+
+
+@mcp.tool()
+def get_memory(issue_id: int) -> dict:
+    """查看该问题的对话记忆（每类操作的调用次数与 token）。"""
+    row = _issue(issue_id)
+    if not row:
+        return {"error": f"问题 #{issue_id} 不存在"}
+    sessions = mem.list_sessions(issue_id)
+    for s in sessions:
+        s["kindLabel"] = mem.KIND_LABELS.get(s["kind"], s["kind"])
+    return {"sessions": sessions}
+
+
+@mcp.tool()
+def clear_memory(issue_id: int, kind: str = "") -> dict:
+    """清空对话记忆。kind 为空清全部（qualify/triage/analysis/apply 之一）。"""
+    row = _issue(issue_id)
+    if not row:
+        return {"error": f"问题 #{issue_id} 不存在"}
+    n = mem.clear_session(issue_id, kind or None)
+    return {"ok": True, "cleared": n}
+
+
+@mcp.tool()
+def list_projects() -> dict:
+    """列出项目（一个项目 = 一组各自独立的 git 仓库）。"""
+    from app import projects as proj_mod
+    return {"projects": proj_mod.list_projects(include_ignored=True)}
 
 
 if __name__ == "__main__":

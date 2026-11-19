@@ -1,9 +1,13 @@
-"""配置读写。API Key 只返回「是否已设置」，避免打开设置页就明文回显。"""
+"""配置读写。
+
+注意：API Key 现在存在 channel 表里（每条通道一份），这里的 SECRET_KEYS
+只保留历史遗留项，避免老库里的值被明文回显。
+"""
 from fastapi import APIRouter, HTTPException
 
+from ..channels import list_channels
 from ..config import PRIORITIES, RUBRIC_VERSION, SEVERITIES
 from ..db import get_settings, save_settings
-from ..providers import provider_names
 from ..schemas import SettingsUpdate
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
@@ -18,7 +22,11 @@ def read_settings():
         value = data.get(key) or ""
         data[key] = ""
         data[f"{key}_set"] = bool(value.strip())
-    return {"settings": data, "providers": provider_names(),
+    channels = list_channels()
+    return {"settings": data,
+            # 兼容旧前端：providers 现在等于通道名列表
+            "providers": [c["name"] for c in channels],
+            "channels": channels,
             "rubricVersion": RUBRIC_VERSION,
             "severities": SEVERITIES, "priorities": PRIORITIES}
 

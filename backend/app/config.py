@@ -8,6 +8,8 @@ BASE_DIR = Path(__file__).resolve().parents[2]
 DATA_DIR = Path(os.getenv("ISSUEHUB_DATA", str(BASE_DIR / "data")))
 DB_PATH = Path(os.getenv("ISSUEHUB_DB", str(DATA_DIR / "issuehub.db")))
 ATTACH_DIR = Path(os.getenv("ISSUEHUB_ATTACH", str(DATA_DIR / "attachments")))
+# 每个 issue 一份的「修复上下文」Markdown：给用户看、可编辑，也是喂给 agent 的边界说明
+CONTEXT_DIR = Path(os.getenv("ISSUEHUB_CONTEXT", str(DATA_DIR / "issue-context")))
 FRONTEND_DIST = BASE_DIR / "frontend" / "dist"
 
 # 允许的附件类型（截图为主，顺带支持 PDF）
@@ -44,6 +46,33 @@ DEFAULT_SETTINGS = {
     # Claude Code CLI
     "claude.bin": "claude",
     "claude.model": "",
-    # AI 分析代码时的工作目录（多个仓库时填父目录，或填单个仓库）
+    # AI 分析代码时的工作目录（单目录，兼容旧配置）
     "repo.root": "/src/gym-fold",
+    # 扫描根：一行一个，从这些目录往下找 git 仓库并自动聚成项目。
+    # 换机器/加项目只改这里，不用维护一堆具体目录。
+    "code.scan_roots": "\n".join([
+        "/src",
+    ]),
+    # 兼容旧配置：直接指定候选目录（有值时会跳过扫描，仅作兜底）
+    "code.roots": "",
+    # 搜索时跳过的目录名（逗号分隔）：这些目录体量大且与业务无关
+    "code.ignore": "node_modules,target,dist,build,backup,import-json,.git,.venv,.venv-mcp,worktrees",
+    # 项目说明：告诉 AI 每个仓库是什么，避免在父目录里乱撞
+    "code.project_notes": "\n".join([
+        "gym-java-1       后端（Spring Boot + MyBatis-Plus）",
+        "gym-vue-1        PC 管理端（Vue3 + Element Plus）",
+        "gym-uniapp       会员端小程序（uni-app）",
+        "gym-admin-uniapp 管理端小程序（uni-app）",
+    ]),
 }
+
+# 扫描时不再深入的目录（名字命中即跳过，避免遍历 node_modules 这种）
+SCAN_SKIP_DIRS = {
+    "node_modules", "target", "dist", "build", "out", ".git", ".idea", ".vscode",
+    "__pycache__", ".venv", ".venv-mcp", "venv", "worktrees", ".next", ".nuxt",
+    "vendor", "Pods", ".gradle", ".m2", "coverage", ".cache",
+}
+
+# 扫描最大深度：扫描根往下几层找仓库。/src/gym-fold/gym-java-1 是 2 层，
+# 再深一般是仓库内部的子目录，没必要继续挖。
+SCAN_MAX_DEPTH = 3

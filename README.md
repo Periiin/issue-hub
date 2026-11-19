@@ -27,18 +27,130 @@ cd /src/issue-hub
    **当前版本不改代码**，只给方案；改代码建议在 worktree 里做、人工合并。
 6. **导出**：单条「导出 Markdown」，列表页「导出周报」按优先级分组。
 
-## AI 执行器
+## AI 通道
 
-在「设置」里选默认执行器，单次操作也可以临时切换（详情页有下拉框）。
+「执行器」这个概念被换成了「通道」：用户真正拥有的是一组 API 端点和模型名，
+而不是写死的三选一。设置页可以配任意多个通道，issue 上记住上次用的。
 
-| 执行器 | 说明 | 需要什么 |
+| 类型 | 说明 | 能改代码 |
 |---|---|---|
-| `mock` | 返回固定假数据，用来验证流程，不花额度 | 无 |
-| `deepseek` | 调 DeepSeek OpenAI 兼容接口，快、便宜，**看不到代码** | API Key |
-| `dsh` | `dsh --profile headless "<任务>"`，同机可读仓库 | 本机装好 dsh |
-| `claude` | `claude -p "<任务>"`，同机可读仓库（只读工具白名单） | 本机装好 claude |
+| **API 端点** | OpenAI 兼容格式（官方 / 中转站 / 自建都行） | ✅ 靠内置工具循环 |
+| **本地 Agent** | `claude` / `dsh` 这类命令行，自带文件工具 | ✅ 开箱即可 |
+| **Mock** | 假数据，验证流程不花额度 | ❌ |
 
-提示词在 `backend/app/prompts.py`，定级规则带版本号（`RUBRIC_VERSION`），改规则时递增即可追溯。
+配置项：名称、Base URL、API Key、模型（可点「拉取模型」从 `/v1/models` 取）、
+温度、工具循环最大轮数。有「测试」按钮做真实连通性检查。
+
+### 截图识别（多模态）
+
+甲方截图里的报错和界面状态往往是最关键的信息。API 通道会把附件图片转成
+base64 的 `image_url` 内容块（`app/vision.py`）：
+
+```python
+[{"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}},
+ {"type": "text", "text": "问题描述 + 指令"}]
+```
+
+- 支持 png/jpeg/webp/gif，单张 ≤4MB，单次最多 6 张
+- 转不进去的图（超限/格式不支持）会在文本里注明「有 N 个附件无法读取，
+  请不要猜测图中信息」——避免模型臆造
+- 没有可用图片时退回纯字符串，兼容只支持文本的模型
+- claude / dsh 这类能自己读文件的 agent 走文件路径，不重复编码
+
+### 采纳前强制验证
+
+模型改完代码 ≠ 代码能编译。采纳时会在 **worktree 里**先跑验证，失败就阻止提交。
+
+命令优先级：`project.verify_cmd`（手动配）→ 自动推断：
+
+| 特征 | 推断命令 |
+|---|---|
+| `pom.xml` | `mvn -q -DskipTests compile` |
+| `build.gradle` | `./gradlew -q compileJava` |
+| `package.json` 有 type-check/typecheck/lint/build | `npm run <那个脚本>` |
+| 有 `tsconfig.json` | `npx vue-tsc --noEmit \|\| npx tsc --noEmit` |
+| `go.mod` / `Cargo.toml` | `go build ./...` / `cargo check` |
+
+推断不出来时 `ok=null`（跳过，不阻断），但会在 UI 里提示「未验证」。
+
+接口：`POST /api/issues/{id}/fix/verify`（只验证不提交，UI 有「先验证」按钮）。
+
+### 手机端（PWA）
+
+`frontend/public/` 里有 manifest、service worker、图标。手机浏览器打开后
+「添加到主屏幕」即可像 App 一样使用，支持：
+- 静态资源缓存（二次打开秒开）
+- 离线兜底页
+- **API 请求不缓存**（issue 数据必须实时，缓存了看到过期状态更糟）
+
+注意：service worker 只在 https 或 localhost 下生效，**局域网 http 访问不会注册**。
+
+### 对话记忆
+
+**记忆挂在「问题」上，不挂在 agent 上**。同一个 issue 的同一类操作共用一个 session，
+换通道、换模型、隔几天再来，新模型先读历史就知道之前讨论过什么。
+
+按操作类型隔离成四份，互不污染：
+
+| kind | 用途 |
+|---|---|
+| `qualify` | 定性 |
+| `triage` | 定级 |
+| `analysis` | 分析 |
+| `apply` | 改代码 |
+
+为什么隔离：把「整理一段话」和几十轮改代码的工具调用混在一个上下文里，
+既贵又干扰判断。
+
+**存什么**：只存「提问 + 结论」的对话轮，**不存工具调用过程**。
+过程又长又会过期（代码改了就失效），下次让模型重新调用工具拿最新内容更可靠。
+
+**注入什么**：除了对话历史，还会拼一段「已知背景」（`build_memory_block`）：
+
+- 已确认的问题描述（人工确认过，视为事实）
+- 定级结论
+- 上一轮分析结论（改代码时给，标注「可能与实际不符」）
+- **历史修改记录**：实际根因、与方案的出入、当时发现的新问题、改过的文件
+  → 末尾加一句「不要重复踩过的坑；如果判断与历史不同，请说明依据」
+
+**裁剪**（`trim_messages`）：工具结果累积很容易撞上下文上限。
+
+- 预算 60K 估算 token（字符数 / 2.5，中英混排偏保守）
+- 永远保留 `system` + 第一条 `user`（原始任务）+ 最新对话
+- 从最旧的「assistant + tool」对开始丢，**不拆散 tool_calls 与其结果**（拆了 API 会 400）
+- 丢掉的位置插一条说明，让模型知道有历史被省略
+
+**去重**：同一个工具 + 同样参数重复调用时，不重复回灌全文，只返回一句指代。
+实测模型会反复 `read_file` 同一个文件确认，每次都塞 8K 字符纯属浪费。
+
+接口：
+
+```
+GET    /api/issues/{id}/memory           查看各类记忆的调用次数/token
+DELETE /api/issues/{id}/memory?kind=     清空（不传 kind 清全部）
+```
+
+前端在详情页右栏「准备」tab 底部展示，可单独清空某一类。
+
+### API 通道的工具循环
+
+纯 API 只能返回文本，没法读写文件。为了让它也能改代码，后端自己实现了
+function calling 循环（`app/codetools.py`）：
+
+```
+用户问题 + tools 定义  →  模型返回 tool_calls
+                          ↓ 执行（read/list/grep/write/edit）
+                       结果回灌 → 模型继续 → … → 输出结论
+```
+
+工具：`list_dir`、`read_file`、`grep`，写入场景额外给 `write_file`、`edit_file`。
+只读场景（定性/定级）**不注册写工具**，模型看不到也就不会尝试。
+
+安全边界：
+- 所有路径必须落在 worktree 内（`_safe_path`），越界直接拒绝
+- 单次读取 40K 字符、grep 80 条上限，防上下文爆炸
+- 不提供 shell / delete / move，改动只能由 git diff 呈现
+- `max_rounds` 控制轮数，用完会标注「可能不完整」
 
 ## 主题（亮 / 暗）
 
@@ -79,18 +191,83 @@ cd /src/issue-hub/backend
 .venv-mcp/bin/python /tmp/mcp_client_test.py    # 需要一个用官方 SDK 写的客户端脚本
 ```
 
-## 代码范围（分析 vs 修改）
+## 项目（Project）
 
-分析只读，允许跨项目；修改必须落到具体 git 仓库：
+一个项目 = 一组**各自独立**的 git 仓库。现实里「一个系统」经常是多个仓库
+（gym = java + vue + 两个 uniapp），而且它们不一定在同一个父目录下
+（`mes-java-2` 和 `mes-vue-2.0` 就在 `/src` 同级）。
 
-| 阶段 | 选择方式 | 原因 |
-|---|---|---|
-| 分析（找根因/给方案） | **多选目录**，可以直接选 `/src/gym-fold` 这种父目录 | agent 用 grep/read 全目录搜索，不依赖 git |
-| 改代码（worktree + diff） | **单选一个 git 仓库** | worktree / branch / merge 都是仓库级操作 |
+```
+project(id, name, repos[json], notes, ignored)
+issue.project_id  →  归属项目
+```
 
-规划中的字段：`issue.code_scopes`（JSON 数组，分析用）+ `issue.target_repo`（字符串，修改用），
-详情页「操作解决」上方提供多选，记住上次选择。
+选定项目后：
+- **代码范围**（分析搜索哪些目录）= 项目里的仓库
+- **可改仓库**（worktree 在哪些仓库建）= 项目里的仓库，可在详情页临时取消某个
 
+仓库仍然是独立仓库：worktree / branch / merge 都在单个仓库里做，项目只是集合。
+
+### 配置：扫描根代替手填目录
+
+设置页只配「扫描根」（一行一个，如 `/src`、`E:/project`），
+后端自动往下 3 层找 git 仓库并聚成候选项目：
+
+| 情况 | 聚类结果 |
+|---|---|
+| 扫描根的**直接子仓库** | 各自独立项目（bom-editor / gym-uniapp / issue-hub …） |
+| 扫描根**子目录里的仓库** | 按子目录聚成一个项目（gym-fold 4 个 / asano-mes 2 个） |
+| 名字前缀相近但不同父目录 | **只给合并建议，不自动合并**（mes-java-2 + mes-vue-2.0 → 建议合成 mes） |
+
+换机器只改扫描根，不用重新维护一堆目录。
+
+### 接口
+
+```
+GET   /api/code/scan?dry=true     扫描预览（不入库）
+GET   /api/code/scan?dry=false    扫描并导入新候选项目（已存在的跳过）
+GET   /api/projects               项目列表（含 ignored）
+POST  /api/projects               新建 {name, repos[], notes}
+PATCH /api/projects/{id}          改名 / 改仓库 / 说明 / ignored
+DELETE /api/projects/{id}         删除（关联 issue 的 project_id 置空，不删 issue）
+POST  /api/projects/merge         合并 {target_id, source_id, name}
+GET   /api/code/roots?project_id= 候选仓库（传 project_id 只返回该项目）
+```
+
+## 操作解决闭环
+
+```
+生成修复方案（只读）
+  → 在 code_scopes 里定位根因，写 fix_plan
+开始修改（写）
+  → 在 target_repo 上建 worktree（分支 issue-<id>）
+  → agent（claude / dsh）只改 worktree 里的文件
+  → 收集 git diff（stat + 逐行）
+采纳并合并
+  → 在 worktree 提交
+  → 主仓库干净时 ff 合回当前分支；不干净则只提交并给出手工合并命令
+驳回
+  → 删除 worktree 和分支，状态回到「待处理」
+```
+
+护栏：
+
+- 只改 worktree，绝不直接动主仓库工作区
+- 不 push、不部署、不连生产库
+- 主仓库有未提交改动时**拒绝自动合并**
+- 只有 `claude` / `dsh` 能执行「开始修改」（DeepSeek API 只能出文本）
+
+相关 API：
+
+```
+GET  /api/code/roots              候选目录（带 isGit/exists）
+POST /api/issues/{id}/fix/apply   { provider, repo }  建 worktree 并让 agent 改
+GET  /api/issues/{id}/fix/diff    重新收集 diff
+POST /api/issues/{id}/fix/accept  { message, merge }  提交 +（可选）合并
+POST /api/issues/{id}/fix/reject  丢弃 worktree 与分支
+```
+
+## 数据
 ## 数据
 
 ```

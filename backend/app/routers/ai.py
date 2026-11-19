@@ -4,14 +4,18 @@
 """
 import json
 
+from pathlib import Path
+
 from fastapi import APIRouter, HTTPException
 
 from ..config import COMPLEXITIES, PRIORITIES, RUBRIC_VERSION, SEVERITIES
 from ..db import add_event, connect, get_settings, now
+from ..fix import ignore_list, project_notes
 from ..prompts import (QUALIFY_SYSTEM, FIX_SYSTEM, TRIAGE_SYSTEM, build_fix_prompt,
                        build_qualify_prompt, build_triage_prompt, extract_json)
 from ..schemas import AIRequest, FixRequest, QualifyConfirm
-from ..providers import AIError, run_ai
+from ..channels import AIError, run_ai
+from .. import memory as mem
 
 router = APIRouter(prefix="/api/issues", tags=["ai"])
 
@@ -34,6 +38,38 @@ def _record_run(conn, issue_id: int, kind: str, result, ok: bool, error: str | N
     )
 
 
+def _json_list(raw) -> list[str]:
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+        return [str(x) for x in data] if isinstance(data, list) else []
+    except json.JSONDecodeError:
+        return []
+
+
+def _issue_images(issue_id: int) -> list[str]:
+    """取该问题的附件图片绝对路径（vision 层会过滤掉非图片/过大/读失败的）。"""
+    from ..config import ATTACH_DIR
+    with connect() as conn:
+        rows = conn.execute("SELECT path FROM attachment WHERE issue_id = ?",
+                            (issue_id,)).fetchall()
+    return [str(ATTACH_DIR / r["path"]) for r in rows]
+
+
+def _common_cwd(scopes: list[str]) -> str | None:
+    """多个目录时取公共父目录，让 agent 能跨项目搜索；单目录直接用它。"""
+    if not scopes:
+        return None
+    if len(scopes) == 1:
+        return scopes[0]
+    import os
+    try:
+        return os.path.commonpath([str(Path(x).resolve()) for x in scopes])
+    except ValueError:
+        return None
+
+
 @router.post("/{issue_id}/qualify")
 def qualify(issue_id: int, payload: AIRequest):
     """AI 定性：把甲方原话整理成结构化问题描述（草稿，需人工确认）。"""
@@ -46,7 +82,11 @@ def qualify(issue_id: int, payload: AIRequest):
     paths = [str(ATTACH_DIR / p) for p in attachments]
     prompt = build_qualify_prompt(issue, paths)
     try:
-        result = run_ai(payload.provider or "", prompt, QUALIFY_SYSTEM)
+        block = mem.build_memory_block(issue, current_kind="qualify")
+        # 图片交给 vision 层转多模态；不支持图片的通道会自动退回纯文本
+        result = run_ai(payload.channel_id, prompt, QUALIFY_SYSTEM,
+                        issue_id=issue_id, kind="qualify", memory_block=block,
+                        images=paths)
         data = extract_json(result.text)
     except (AIError, ValueError) as ex:
         with connect() as conn:
@@ -58,7 +98,8 @@ def qualify(issue_id: int, payload: AIRequest):
                      (json.dumps(data, ensure_ascii=False), RUBRIC_VERSION, now(), issue_id))
         add_event(conn, issue_id, "qualify", note=f"AI 定性（{result.provider}）")
     return {"draft": data, "provider": result.provider, "model": result.model,
-            "durationMs": result.duration_ms}
+            "durationMs": result.duration_ms, "rounds": result.rounds,
+            "toolCalls": result.tool_calls}
 
 
 @router.post("/{issue_id}/qualify/confirm")
@@ -92,7 +133,10 @@ def triage(issue_id: int, payload: AIRequest):
     confirmed = json.loads(issue["qualify_final"])
     prompt = build_triage_prompt(confirmed)
     try:
-        result = run_ai(payload.provider or "", prompt, TRIAGE_SYSTEM)
+        block = mem.build_memory_block(issue, current_kind="triage")
+        result = run_ai(payload.channel_id, prompt, TRIAGE_SYSTEM,
+                        issue_id=issue_id, kind="triage", memory_block=block,
+                        images=_issue_images(issue_id))
         data = extract_json(result.text)
     except (AIError, ValueError) as ex:
         with connect() as conn:
@@ -126,10 +170,22 @@ def make_fix_plan(issue_id: int, payload: FixRequest):
     if not issue.get("qualify_final"):
         raise HTTPException(400, "还没有确认过的问题描述，先完成定性")
     confirmed = json.loads(issue["qualify_final"])
-    repo_root = (get_settings().get("repo.root") or "").strip()
-    prompt = build_fix_prompt(confirmed, repo_root or "（未配置）")
+    # 代码范围优先级：issue 自己勾的 → 所属项目的仓库 → 全局 repo.root（兜底）
+    scopes = _json_list(issue.get("code_scopes"))
+    if not scopes and issue.get("project_id"):
+        from .. import projects as proj
+        scopes = (proj.get_project(issue["project_id"]) or {}).get("repos") or []
+    if not scopes:
+        scopes = [(get_settings().get("repo.root") or "").strip()]
+    scopes = [s for s in scopes if s]
+    cwd = _common_cwd(scopes)
+    prompt = build_fix_prompt(confirmed, scopes, ignore_list(), project_notes())
     try:
-        result = run_ai(payload.provider or "", prompt, FIX_SYSTEM, cwd=repo_root or None)
+        from ..fix import list_attempts
+        block = mem.build_memory_block(issue, list_attempts(issue_id), current_kind="analysis")
+        result = run_ai(payload.channel_id, prompt, FIX_SYSTEM, cwd=cwd,
+                        issue_id=issue_id, kind="analysis", memory_block=block,
+                        images=_issue_images(issue_id))
         data = extract_json(result.text)
     except (AIError, ValueError) as ex:
         with connect() as conn:
