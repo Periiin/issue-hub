@@ -2,6 +2,67 @@ import axios from 'axios'
 
 export const api = axios.create({ baseURL: '/api', timeout: 240000 })
 
+/* ===== 鉴权 =====
+ * token 存 localStorage，每个请求自动带 Authorization。
+ * 401 时清掉 token 并跳登录页 —— 否则用户会看到一堆"加载失败"却不知道为什么。
+ */
+const TOKEN_KEY = 'ih_token'
+
+export const getToken = () => localStorage.getItem(TOKEN_KEY) || ''
+export const setToken = (t: string) => localStorage.setItem(TOKEN_KEY, t)
+export const clearToken = () => localStorage.removeItem(TOKEN_KEY)
+
+api.interceptors.request.use((cfg) => {
+  const t = getToken()
+  if (t) cfg.headers.Authorization = `Bearer ${t}`
+  return cfg
+})
+
+api.interceptors.response.use(
+  (res) => res,
+  (err) => {
+    if (err?.response?.status === 401 && location.pathname !== '/login') {
+      clearToken()
+      location.href = '/login'
+    }
+    return Promise.reject(err)
+  }
+)
+
+export interface AuthUser {
+  id: number
+  username: string
+  displayName: string
+  role: 'admin' | 'user'
+}
+
+export const getAuthMode = () =>
+  api.get<{ enabled: boolean }>('/auth/mode').then((r) => r.data)
+
+export const login = (username: string, password: string) =>
+  api.post<{ token: string; user: AuthUser; expiresAt: string }>('/auth/login',
+    { username, password }).then((r) => r.data)
+
+export const logout = () => api.post('/auth/logout').then((r) => r.data)
+
+export const getMe = () =>
+  api.get<{ user: AuthUser }>('/auth/me').then((r) => r.data)
+
+export const listUsers = () =>
+  api.get<{ users: AuthUser[] }>('/auth/users').then((r) => r.data)
+
+export const createUser = (data: { username: string; password: string; display_name?: string; role?: string }) =>
+  api.post('/auth/users', data).then((r) => r.data)
+
+export const changePassword = (userId: number, password: string) =>
+  api.patch(`/auth/users/${userId}`, { password }).then((r) => r.data)
+
+export const toggleUser = (userId: number, enabled: boolean) =>
+  api.post(`/auth/users/${userId}/enabled`, null, { params: { enabled } }).then((r) => r.data)
+
+export const deleteUser = (userId: number) =>
+  api.delete(`/auth/users/${userId}`).then((r) => r.data)
+
 export interface Issue {
   id: number
   title: string

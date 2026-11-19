@@ -46,6 +46,13 @@ DEFAULT_SETTINGS = {
     # Claude Code CLI
     "claude.bin": "claude",
     "claude.model": "",
+    # 鉴权：默认关闭（单人本机）。开启后要求账号密码 + IP 白名单
+    "auth.enabled": "0",
+    # IP 白名单：一行一个，支持 CIDR（如 192.168.110.0/24）与单个 IP。空=不限制
+    "auth.ip_allowlist": "",
+    # 可信反代地址：只有来自这些 IP 的请求，X-Forwarded-For 才被采信。
+    # 回环与常见 docker 网关已内置，额外加 nginx 的地址写这里（逗号或换行分隔）
+    "auth.trusted_proxies": "",
     # AI 分析代码时的工作目录（单目录，兼容旧配置）
     "repo.root": "/src/gym-fold",
     # 扫描根：一行一个，从这些目录往下找 git 仓库并自动聚成项目。

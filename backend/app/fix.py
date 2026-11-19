@@ -72,26 +72,44 @@ def repo_slug(repo: str) -> str:
     return slug.lower()
 
 
-def worktree_path(issue_id: int, repo: str | None = None) -> Path:
-    """worktree 路径。传 repo 时为多仓库布局：issue-<id>/<repoSlug>。"""
-    base = WORKTREES_DIR / f"issue-{issue_id}"
+def worktree_path(issue_id: int, repo: str | None = None,
+                  owner_id: int | None = None) -> Path:
+    """worktree 路径。
+
+    多用户时必须按 owner 分目录：issue id 是全局自增的，但不同用户的
+    issue 落在同一个 WORKTREES_DIR 下会互相覆盖（A 的 issue-1 和 B 的
+    issue-1 撞车）。owner 为空（本机单人/历史数据）走旧的扁平布局，
+    保证已有 worktree 不失效。
+    """
+    if owner_id:
+        base = WORKTREES_DIR / f"user-{owner_id}" / f"issue-{issue_id}"
+    else:
+        base = WORKTREES_DIR / f"issue-{issue_id}"
     if repo is None:
         return base
     return base / repo_slug(repo)
 
 
-def branch_name(issue_id: int, repo: str | None = None) -> str:
+def branch_name(issue_id: int, repo: str | None = None,
+                owner_id: int | None = None) -> str:
+    """分支名。
+
+    带 owner 前缀：同一个仓库可能被多个用户同时改不同 issue，
+    分支名撞了会让 `git worktree add -b` 失败。
+    """
+    prefix = f"u{owner_id}-" if owner_id else ""
     if repo is None:
-        return f"issue-{issue_id}"
+        return f"{prefix}issue-{issue_id}"
+    return f"{prefix}issue-{issue_id}-{repo_slug(repo)}"
     return f"issue-{issue_id}-{repo_slug(repo)}"
 
 
-def create_worktree(repo: str, issue_id: int) -> dict:
-    """在 repo 上建独立 worktree（分支 issue-<id>-<slug>），返回位置信息。"""
+def create_worktree(repo: str, issue_id: int, owner_id: int | None = None) -> dict:
+    """在 repo 上建独立 worktree，返回位置信息。"""
     if not is_repo_root(repo):
         raise FixError(f"{repo} 不是 git 仓库根目录，不能作为修改目标")
-    wt = worktree_path(issue_id, repo)
-    branch = branch_name(issue_id, repo)
+    wt = worktree_path(issue_id, repo, owner_id)
+    branch = branch_name(issue_id, repo, owner_id)
     WORKTREES_DIR.mkdir(parents=True, exist_ok=True)
     wt.parent.mkdir(parents=True, exist_ok=True)
 
@@ -155,17 +173,17 @@ def merge_to_base(repo: str, branch: str) -> dict:
     return {"merged": True, "base_branch": base, "output": out}
 
 
-def drop_worktree(repo: str, issue_id: int) -> None:
+def drop_worktree(repo: str, issue_id: int, owner_id: int | None = None) -> None:
     """清理单个仓库的 worktree + 分支，并顺手删掉空的 issue 目录。"""
-    wt = worktree_path(issue_id, repo)
-    branch = branch_name(issue_id, repo)
+    wt = worktree_path(issue_id, repo, owner_id)
+    branch = branch_name(issue_id, repo, owner_id)
     if Path(repo).exists():
         _git(["worktree", "remove", "--force", str(wt)], repo)
         _git(["worktree", "prune"], repo)
         _git(["branch", "-D", branch], repo)
     shutil.rmtree(wt, ignore_errors=True)
     # issue-<id> 目录空了就一起删掉，避免留一堆空目录
-    base = worktree_path(issue_id)
+    base = worktree_path(issue_id, None, owner_id)
     try:
         if base.exists() and not any(base.iterdir()):
             base.rmdir()
@@ -173,10 +191,11 @@ def drop_worktree(repo: str, issue_id: int) -> None:
         pass
 
 
-def drop_all_worktrees(issue_id: int, repos: list[str]) -> None:
+def drop_all_worktrees(issue_id: int, repos: list[str],
+                       owner_id: int | None = None) -> None:
     for repo in repos or []:
         try:
-            drop_worktree(repo, issue_id)
+            drop_worktree(repo, issue_id, owner_id)
         except Exception:
             pass
 

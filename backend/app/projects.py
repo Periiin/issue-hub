@@ -166,6 +166,7 @@ def _row(r) -> dict:
         d["repos"] = []
     d["ignored"] = bool(d.get("ignored"))
     d["verify_cmd"] = d.get("verify_cmd") or ""
+    d["owner_id"] = d.get("owner_id")
     return d
 
 
@@ -201,14 +202,14 @@ def find_project_by_repo(repo: str) -> dict | None:
 
 
 def create_project(name: str, repos: list[str], notes: str = "",
-                   verify_cmd: str = "") -> int:
+                   verify_cmd: str = "", owner_id: int | None = None) -> int:
     ts = now()
     with connect() as conn:
         cur = conn.execute(
-            "INSERT INTO project(name, repos, notes, verify_cmd, ignored, sort, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, 0, 0, ?, ?)",
+            "INSERT INTO project(name, repos, notes, verify_cmd, owner_id, ignored, sort, "
+            "created_at, updated_at) VALUES (?, ?, ?, ?, ?, 0, 0, ?, ?)",
             (name.strip() or "未命名项目", json.dumps(repos, ensure_ascii=False), notes,
-             (verify_cmd or "").strip(), ts, ts))
+             (verify_cmd or "").strip(), owner_id, ts, ts))
         return cur.lastrowid
 
 

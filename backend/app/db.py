@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS issue (
     target_repos    TEXT,                        -- JSON 数组：改代码用的 git 仓库（可多个）
     fix_state       TEXT,                        -- JSON：按仓库分组的 worktree/branch/diff 状态
     project_id      INTEGER,                     -- 所属项目（project 表），决定默认代码范围与仓库
+    owner_id        INTEGER,                     -- 归属用户（app_user.id）；NULL=本机/历史数据
     created_at      TEXT NOT NULL,
     updated_at      TEXT NOT NULL
 );
@@ -86,6 +87,7 @@ CREATE TABLE IF NOT EXISTS project (
     repos       TEXT,                  -- JSON 数组：仓库绝对路径（各自是独立 git 仓库）
     notes       TEXT,                  -- 给 AI 看的项目说明（可选，会拼进提示词）
     verify_cmd  TEXT,                  -- 采纳前跑的验证命令（如 mvn -q compile / npx vue-tsc）
+    owner_id    INTEGER,               -- 归属用户；NULL=本机/历史数据
     ignored     INTEGER NOT NULL DEFAULT 0,
     sort        INTEGER NOT NULL DEFAULT 0,
     created_at  TEXT NOT NULL,
@@ -106,6 +108,7 @@ CREATE TABLE IF NOT EXISTS channel (
     args        TEXT,                          -- agent 类型：额外参数（空格分隔）
     temperature REAL NOT NULL DEFAULT 0.2,
     max_rounds  INTEGER NOT NULL DEFAULT 25,   -- 工具循环最大轮数
+    owner_id    INTEGER,               -- 归属用户；NULL=共享（管理员配的）
     enabled     INTEGER NOT NULL DEFAULT 1,
     sort        INTEGER NOT NULL DEFAULT 0,
     created_at  TEXT NOT NULL,
@@ -127,6 +130,29 @@ CREATE TABLE IF NOT EXISTS ai_session (
     updated_at  TEXT NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS uk_ai_session ON ai_session(issue_id, kind);
+
+-- 用户：白名单 IP + 账号密码登录。
+-- role: admin（能看所有人的、能配通道）/ user（只看自己的）
+CREATE TABLE IF NOT EXISTS app_user (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    username      TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    display_name  TEXT,
+    role          TEXT NOT NULL DEFAULT 'user',
+    enabled       INTEGER NOT NULL DEFAULT 1,
+    created_at    TEXT NOT NULL,
+    updated_at    TEXT NOT NULL
+);
+
+-- 登录会话：token 存库，服务重启不掉线
+CREATE TABLE IF NOT EXISTS app_session (
+    token       TEXT PRIMARY KEY,
+    user_id     INTEGER NOT NULL,
+    ip          TEXT,
+    created_at  TEXT NOT NULL,
+    expires_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_app_session_user ON app_session(user_id);
 
 CREATE TABLE IF NOT EXISTS event (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -173,6 +199,7 @@ def init_db() -> None:
             ("target_repos", "ALTER TABLE issue ADD COLUMN target_repos TEXT"),
             ("fix_state", "ALTER TABLE issue ADD COLUMN fix_state TEXT"),
             ("project_id", "ALTER TABLE issue ADD COLUMN project_id INTEGER"),
+            ("owner_id", "ALTER TABLE issue ADD COLUMN owner_id INTEGER"),
         ):
             if column not in existing:
                 conn.execute(ddl)
@@ -180,6 +207,12 @@ def init_db() -> None:
         proj_cols = {r["name"] for r in conn.execute("PRAGMA table_info(project)").fetchall()}
         if "verify_cmd" not in proj_cols:
             conn.execute("ALTER TABLE project ADD COLUMN verify_cmd TEXT")
+        if "owner_id" not in proj_cols:
+            conn.execute("ALTER TABLE project ADD COLUMN owner_id INTEGER")
+        # channel 也补 owner_id
+        ch_cols = {r["name"] for r in conn.execute("PRAGMA table_info(channel)").fetchall()}
+        if "owner_id" not in ch_cols:
+            conn.execute("ALTER TABLE channel ADD COLUMN owner_id INTEGER")
         # 默认配置只补不覆盖，避免每次启动把用户改过的值重置
         for key, value in DEFAULT_SETTINGS.items():
             conn.execute("INSERT OR IGNORE INTO setting(key, value) VALUES (?, ?)", (key, value))

@@ -1,5 +1,7 @@
 <template>
-  <div class="shell">
+  <!-- 登录页这类独立页面不套壳：没有顶栏和底部导航 -->
+  <router-view v-if="$route.meta?.bare" />
+  <div v-else class="shell">
     <header class="topbar">
       <div class="topbar-inner">
         <div class="brand" @click="$router.push('/issues')">

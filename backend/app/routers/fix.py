@@ -29,6 +29,7 @@ from ..fix import (FixError, collect_diff, commit_all, create_worktree, current_
 from ..prompts import APPLY_SYSTEM, build_apply_prompt, parse_apply_report
 from ..channels import AIError, resolve_channel, run_ai
 from ..schemas import (ContextUpdate, FixAcceptReq, FixApplyReq, FixRejectReq)
+from .auth import require_user
 
 router = APIRouter(prefix="/api", tags=["fix"])
 
@@ -245,7 +246,7 @@ def apply_fix(issue_id: int, payload: FixApplyReq):
     for repo in repos:
         info = None
         try:
-            info = create_worktree(repo, issue_id)
+            info = create_worktree(repo, issue_id, issue.get("owner_id"))
         except FixError as ex:
             state["repos"][repo] = {"repo": repo, "status": "failed", "error": str(ex),
                                     "provider": provider, "updated_at": now()}
@@ -579,10 +580,10 @@ def reject_fix(issue_id: int, payload: FixRejectReq | None = None):
     if target:
         if target not in repos:
             raise HTTPException(404, f"{target} 不在本次修改范围内")
-        drop_all_worktrees(issue_id, [target])
+        drop_all_worktrees(issue_id, [target], issue.get("owner_id"))
         repos.pop(target, None)
     else:
-        drop_all_worktrees(issue_id, list(repos.keys()))
+        drop_all_worktrees(issue_id, list(repos.keys()), issue.get("owner_id"))
         repos = {}
 
     if repos:

@@ -45,6 +45,7 @@ def _row(r) -> dict:
     d = dict(r)
     d["enabled"] = bool(d.get("enabled"))
     d["hasKey"] = bool((d.get("api_key") or "").strip())
+    d["owner_id"] = d.get("owner_id")
     # 密钥不回传明文，前端只需要知道有没有配
     d.pop("api_key", None)
     return d
@@ -78,13 +79,13 @@ def create_channel(data: dict) -> int:
     with connect() as conn:
         cur = conn.execute(
             "INSERT INTO channel(name, kind, base_url, api_key, model, command, args, "
-            "temperature, max_rounds, enabled, sort, created_at, updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "temperature, max_rounds, owner_id, enabled, sort, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (data.get("name") or "未命名通道", data.get("kind") or "api",
              data.get("base_url") or "", data.get("api_key") or "", data.get("model") or "",
              data.get("command") or "", data.get("args") or "",
              float(data.get("temperature") if data.get("temperature") is not None else 0.2),
-             int(data.get("max_rounds") or 25),
+             int(data.get("max_rounds") or 25), data.get("owner_id"),
              1 if data.get("enabled", True) else 0, int(data.get("sort") or 0), ts, ts))
         return cur.lastrowid
 

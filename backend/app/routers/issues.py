@@ -4,21 +4,44 @@ import shutil
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import PlainTextResponse
 
 from ..config import ALL_STATUS, ATTACH_DIR, MAX_UPLOAD_BYTES
 from ..db import add_event, connect, dict_row, list_rows, now, valid_status
+from .auth import require_user
 from ..schemas import IssueCreate, IssuePatch
 
 router = APIRouter(prefix="/api/issues", tags=["issues"])
 
 
-def _load_issue(conn, issue_id: int) -> dict:
+def _owner_filter(user: dict) -> tuple[str, list]:
+    """按用户过滤 SQL 片段。
+
+    admin 看全部；普通用户只看自己的 + 历史遗留（owner_id 为空）。
+    历史数据 owner_id 为空是因为加鉴权之前录的，不该让它们凭空消失。
+    """
+    if user.get("role") == "admin":
+        return "", []
+    return "(owner_id = ? OR owner_id IS NULL)", [user.get("id") or 0]
+
+
+def _load_issue(conn, issue_id: int, user: dict | None = None) -> dict:
+    """读 issue 并校验归属。
+
+    所有单条接口都走这里 —— 一处校验比在每个端点重复写可靠，
+    漏一个就是「拼 id 就能看别人问题」的越权。
+    """
     row = conn.execute("SELECT * FROM issue WHERE id = ?", (issue_id,)).fetchone()
     if row is None:
         raise HTTPException(404, "问题不存在")
-    return dict(row)
+    issue = dict(row)
+    if user and user.get("role") != "admin":
+        owner = issue.get("owner_id")
+        # owner_id 为空 = 加鉴权之前的历史数据，允许读
+        if owner is not None and owner != user.get("id"):
+            raise HTTPException(404, "问题不存在")   # 不暴露「存在但无权」
+    return issue
 
 
 def _json_or_none(raw: str | None):
@@ -32,8 +55,13 @@ def _json_or_none(raw: str | None):
 
 @router.get("")
 def list_issues(status: str = "", priority: str = "", module: str = "",
-                q: str = "", limit: int = Query(200, le=500)):
+                q: str = "", limit: int = Query(200, le=500),
+                user: dict = Depends(require_user)):
     where, args = [], []
+    owner_sql, owner_args = _owner_filter(user)
+    if owner_sql:
+        where.append(owner_sql)
+        args += owner_args
     if status:
         where.append("status = ?")
         args.append(status)
@@ -54,20 +82,24 @@ def list_issues(status: str = "", priority: str = "", module: str = "",
     args.append(limit)
     with connect() as conn:
         rows = list_rows(conn.execute(sql, args).fetchall())
-        counts = {r["status"]: r["n"] for r in conn.execute(
-            "SELECT status, COUNT(*) n FROM issue GROUP BY status").fetchall()}
+        count_sql = "SELECT status, COUNT(*) n FROM issue"
+        if owner_sql:
+            count_sql += " WHERE " + owner_sql
+        count_sql += " GROUP BY status"
+        counts = {r["status"]: r["n"] for r in conn.execute(count_sql, owner_args).fetchall()}
     return {"list": rows, "counts": counts, "statuses": ALL_STATUS}
 
 
 @router.post("")
-def create_issue(payload: IssueCreate):
+def create_issue(payload: IssueCreate, user: dict = Depends(require_user)):
     title = (payload.title or "").strip() or (payload.raw_text or "").strip()[:30] or "未命名问题"
     ts = now()
     with connect() as conn:
         cur = conn.execute(
-            "INSERT INTO issue(title, raw_text, source, reporter, module, status, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, '待定性', ?, ?)",
-            (title, payload.raw_text, payload.source, payload.reporter, payload.module, ts, ts),
+            "INSERT INTO issue(title, raw_text, source, reporter, module, status, owner_id, "
+            "created_at, updated_at) VALUES (?, ?, ?, ?, ?, '待定性', ?, ?, ?)",
+            (title, payload.raw_text, payload.source, payload.reporter, payload.module,
+             user.get("id") or None, ts, ts),
         )
         issue_id = cur.lastrowid
         add_event(conn, issue_id, "create", to_status="待定性", note="新建问题")
@@ -75,9 +107,9 @@ def create_issue(payload: IssueCreate):
 
 
 @router.get("/{issue_id}")
-def get_issue(issue_id: int):
+def get_issue(issue_id: int, user: dict = Depends(require_user)):
     with connect() as conn:
-        issue = _load_issue(conn, issue_id)
+        issue = _load_issue(conn, issue_id, user)
         attachments = list_rows(conn.execute(
             "SELECT * FROM attachment WHERE issue_id = ? ORDER BY id", (issue_id,)).fetchall())
         runs = list_rows(conn.execute(
@@ -102,11 +134,11 @@ def get_issue(issue_id: int):
 
 
 @router.get("/{issue_id}/memory")
-def get_memory(issue_id: int):
+def get_memory(issue_id: int, user: dict = Depends(require_user)):
     """查看这个问题的对话记忆：每类操作各一份，与通道无关。"""
     from .. import memory as mem
     with connect() as conn:
-        _load_issue(conn, issue_id)
+        _load_issue(conn, issue_id, user)
     sessions = mem.list_sessions(issue_id)
     for s in sessions:
         s["kindLabel"] = mem.KIND_LABELS.get(s["kind"], s["kind"])
@@ -114,17 +146,17 @@ def get_memory(issue_id: int):
 
 
 @router.delete("/{issue_id}/memory")
-def clear_memory(issue_id: int, kind: str = ""):
+def clear_memory(issue_id: int, kind: str = "", user: dict = Depends(require_user)):
     """清空记忆。kind 为空清全部；否则只清某一类（如只清「改代码」的）。"""
     from .. import memory as mem
     with connect() as conn:
-        _load_issue(conn, issue_id)
+        _load_issue(conn, issue_id, user)
     n = mem.clear_session(issue_id, kind or None)
     return {"ok": True, "cleared": n}
 
 
 @router.patch("/{issue_id}")
-def patch_issue(issue_id: int, payload: IssuePatch):
+def patch_issue(issue_id: int, payload: IssuePatch, user: dict = Depends(require_user)):
     data = payload.model_dump(exclude_none=True)
     if "status" in data and not valid_status(data["status"]):
         raise HTTPException(400, f"非法状态：{data['status']}")
@@ -148,7 +180,7 @@ def patch_issue(issue_id: int, payload: IssuePatch):
     data["updated_at"] = now()
     sets = ", ".join(f"{k} = ?" for k in data)
     with connect() as conn:
-        issue = _load_issue(conn, issue_id)
+        issue = _load_issue(conn, issue_id, user)
         conn.execute(f"UPDATE issue SET {sets} WHERE id = ?", [*data.values(), issue_id])
         if data.get("status") and data["status"] != issue["status"]:
             add_event(conn, issue_id, "status", from_status=issue["status"], to_status=data["status"])
@@ -156,9 +188,9 @@ def patch_issue(issue_id: int, payload: IssuePatch):
 
 
 @router.delete("/{issue_id}")
-def delete_issue(issue_id: int):
+def delete_issue(issue_id: int, user: dict = Depends(require_user)):
     with connect() as conn:
-        issue = _load_issue(conn, issue_id)
+        issue = _load_issue(conn, issue_id, user)
         conn.execute("DELETE FROM issue WHERE id = ?", (issue_id,))
         conn.execute("DELETE FROM attachment WHERE issue_id = ?", (issue_id,))
         conn.execute("DELETE FROM ai_run WHERE issue_id = ?", (issue_id,))
@@ -170,9 +202,10 @@ def delete_issue(issue_id: int):
 # ---------------- 附件 ----------------
 
 @router.post("/{issue_id}/attachments")
-async def upload_attachments(issue_id: int, files: list[UploadFile] = File(...)):
+async def upload_attachments(issue_id: int, files: list[UploadFile] = File(...),
+                            user: dict = Depends(require_user)):
     with connect() as conn:
-        _load_issue(conn, issue_id)
+        _load_issue(conn, issue_id, user)
     saved = []
     target_dir = ATTACH_DIR / str(issue_id)
     target_dir.mkdir(parents=True, exist_ok=True)
@@ -196,7 +229,7 @@ async def upload_attachments(issue_id: int, files: list[UploadFile] = File(...))
 
 
 @router.delete("/{issue_id}/attachments/{attachment_id}")
-def delete_attachment(issue_id: int, attachment_id: int):
+def delete_attachment(issue_id: int, attachment_id: int, user: dict = Depends(require_user)):
     with connect() as conn:
         row = conn.execute("SELECT * FROM attachment WHERE id = ? AND issue_id = ?",
                            (attachment_id, issue_id)).fetchone()
@@ -210,9 +243,9 @@ def delete_attachment(issue_id: int, attachment_id: int):
 # ---------------- 导出 ----------------
 
 @router.get("/{issue_id}/export", response_class=PlainTextResponse)
-def export_issue_md(issue_id: int):
+def export_issue_md(issue_id: int, user: dict = Depends(require_user)):
     with connect() as conn:
-        issue = _load_issue(conn, issue_id)
+        issue = _load_issue(conn, issue_id, user)
         attachments = list_rows(conn.execute(
             "SELECT filename, path FROM attachment WHERE issue_id = ?", (issue_id,)).fetchall())
     final = _json_or_none(issue.get("qualify_final")) or {}
