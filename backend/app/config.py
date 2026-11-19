@@ -50,6 +50,13 @@ DEFAULT_SETTINGS = {
     "auth.enabled": "0",
     # IP 白名单：一行一个，支持 CIDR（如 192.168.110.0/24）与单个 IP。空=不限制
     "auth.ip_allowlist": "",
+    # 限流（防爆破）。rate.enabled=0 可整体关闭（调试时用）
+    "rate.enabled": "1",
+    "rate.login_per_ip": "10",        # 每 IP 每分钟登录尝试
+    "rate.fail_limit": "5",           # 连续失败几次锁定
+    "rate.fail_lock_minutes": "15",   # 锁多久
+    "rate.api_per_min": "300",        # 每分钟 API 请求
+    "rate.heavy_per_hour": "30",      # 重操作（改代码/分析）每小时
     # 验证时是否允许联网（npm/maven 下载依赖需要）。0=断网更安全但依赖未缓存会失败
     "verify.allow_network": "1",
     # 可信反代地址：只有来自这些 IP 的请求，X-Forwarded-For 才被采信。

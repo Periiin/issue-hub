@@ -154,6 +154,24 @@ CREATE TABLE IF NOT EXISTS app_session (
 );
 CREATE INDEX IF NOT EXISTS idx_app_session_user ON app_session(user_id);
 
+-- 限流计数：固定窗口（按分钟/小时对齐），bucket+key+窗口 唯一。
+-- 用库而不是内存：多 worker / 重启都不丢计数。
+CREATE TABLE IF NOT EXISTS rate_counter (
+    bucket       TEXT NOT NULL,     -- login_ip / login_fail / api / heavy
+    key          TEXT NOT NULL,     -- IP、用户名、用户 id
+    window_start TEXT NOT NULL,
+    count        INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (bucket, key, window_start)
+);
+
+-- 登录锁定：IP+用户名 连续失败达阈值后锁一段时间
+CREATE TABLE IF NOT EXISTS rate_lock (
+    lock_key     TEXT PRIMARY KEY,  -- ip|username
+    locked_until TEXT NOT NULL,
+    reason       TEXT,
+    created_at   TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS event (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     issue_id    INTEGER NOT NULL,

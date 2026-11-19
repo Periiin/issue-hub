@@ -361,3 +361,24 @@ export const syncRepoCopy = (source: string) =>
 
 export const syncAllRepoCopies = () =>
   api.post('/repos/sync-all', null, { timeout: 600000 }).then((r) => r.data)
+
+// ---------- 限流状态 ----------
+
+export interface RateStatus {
+  enabled: boolean
+  loginPerIpPerMin: number
+  failLimit: number
+  failLockMinutes: number
+  apiPerMin: number
+  heavyPerHour: number
+  locks: { lock_key: string; locked_until: string; reason?: string; active: boolean; remainSeconds: number }[]
+}
+
+export const getRateStatus = () =>
+  api.get<RateStatus>('/auth/rate/status').then((r) => r.data)
+
+export const unlockRate = (lockKey: string) =>
+  api.post('/auth/rate/unlock', null, { params: { lock_key: lockKey } }).then((r) => r.data)
+
+export const clearRate = () =>
+  api.post('/auth/rate/clear').then((r) => r.data)

@@ -14,7 +14,8 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from .. import auth
-from ..db import get_settings, save_settings
+from .. import ratelimit as rl
+from ..db import connect, get_settings, save_settings
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -118,11 +119,34 @@ def login(payload: LoginReq, request: Request):
     ip = client_ip(request)
     if not auth.ip_allowed(ip):
         raise HTTPException(403, f"IP {ip} 不在白名单内")
-    row = auth.get_user_by_name(payload.username.strip())
+
+    username = payload.username.strip()
+    # 限流前置：IP 频率 + 该 IP+用户名 是否被锁
+    try:
+        rl.check_login(ip, username)
+    except rl.RateLimited as ex:
+        raise HTTPException(429, str(ex),
+                            headers={"Retry-After": str(ex.retry_after)})
+
+    row = auth.get_user_by_name(username)
     if not row or not auth.verify_password(payload.password, row["password_hash"]):
-        raise HTTPException(401, "用户名或密码不正确")
+        # 记失败：连续 N 次就锁
+        info = rl.record_failure(ip, username)
+        if info["locked"]:
+            raise HTTPException(
+                429,
+                f"密码错误 {info['fails']} 次，账号已临时锁定 "
+                f"{max(1, info['remain'] // 60)} 分钟",
+                headers={"Retry-After": str(info["remain"])})
+        # 提示剩余次数，但不要暴露「用户名是否存在」
+        left = max(0, rl._cfg_int("rate.fail_limit", rl.DEFAULT_FAIL_LIMIT) - info["fails"])
+        raise HTTPException(401, f"用户名或密码不正确（还可尝试 {left} 次）")
+
     if not row.get("enabled"):
         raise HTTPException(403, "该账号已被停用")
+
+    # 成功：清掉失败计数
+    rl.clear_failures(ip, username)
     session = auth.create_session(row["id"], ip)
     return {
         "token": session["token"],
@@ -192,6 +216,33 @@ def remove_user(user_id: int, request: Request):
         raise HTTPException(400, "不能删除自己")
     auth.delete_user(user_id)
     return {"ok": True}
+
+
+# ---------------- 限流管理（管理员） ----------------
+
+@router.get("/rate/status")
+def rate_status(request: Request):
+    require_admin(request)
+    return rl.status()
+
+
+@router.post("/rate/unlock")
+def rate_unlock(lock_key: str, request: Request):
+    """手工解锁。lock_key 形如 `192.168.1.5|alice`。"""
+    require_admin(request)
+    rl.unlock(lock_key)
+    return {"ok": True}
+
+
+@router.post("/rate/clear")
+def rate_clear(request: Request):
+    """清空所有计数与锁（换环境/误伤时用）。"""
+    require_admin(request)
+    n = rl.purge_old(days=0)
+    with connect() as conn:
+        conn.execute("DELETE FROM rate_counter")
+        conn.execute("DELETE FROM rate_lock")
+    return {"ok": True, "purged": n}
 
 
 @router.post("/mode")

@@ -12,6 +12,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import auth as auth_mod
+from . import ratelimit as rl
 from .config import ATTACH_DIR, FRONTEND_DIST
 from .db import init_db
 from .routers import ai, auth, channels, fix, issues, projects, report, repos, settings
@@ -39,15 +40,31 @@ async def auth_guard(request: Request, call_next):
     path = request.url.path
     if not path.startswith("/api/") or path in OPEN_PATHS:
         return await call_next(request)
-    if not auth_enabled():
-        return await call_next(request)
 
     ip = client_ip(request)
+
+    # 鉴权关闭时也要限流：单人本机同样可能被脚本刷接口烧 token
+    if not auth_enabled():
+        try:
+            rl.check_api(None, ip, path)
+        except rl.RateLimited as ex:
+            return JSONResponse({"detail": str(ex)}, status_code=429,
+                                headers={"Retry-After": str(ex.retry_after)})
+        return await call_next(request)
+
     if not auth_mod.ip_allowed(ip):
         return JSONResponse({"detail": f"IP {ip} 不在白名单内"}, status_code=403)
 
-    if current_user(request) is None:
+    user = current_user(request)
+    if user is None:
         return JSONResponse({"detail": "未登录或登录已过期"}, status_code=401)
+
+    # 通用限流：普通请求按分钟，重操作（改代码/分析）按小时
+    try:
+        rl.check_api(user.get("id"), ip, path)
+    except rl.RateLimited as ex:
+        return JSONResponse({"detail": str(ex)}, status_code=429,
+                            headers={"Retry-After": str(ex.retry_after)})
 
     return await call_next(request)
 
@@ -66,6 +83,11 @@ app.include_router(settings.router)
 @app.on_event("startup")
 def _startup() -> None:
     init_db()
+    # 清掉过期的限流计数，避免表无限增长
+    try:
+        rl.purge_old(days=2)
+    except Exception:
+        pass
     # 没有用户时建 admin 并把初始密码打到日志（只打一次）
     initial = auth_mod.ensure_admin()
     if initial:

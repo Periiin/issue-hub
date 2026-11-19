@@ -8,6 +8,66 @@
       <el-button type="primary" round :loading="saving" @click="save">保存配置</el-button>
     </div>
 
+    <!-- 安全与限流 -->
+    <section class="panel ih-card">
+      <div class="panel-head">
+        <div class="panel-title">
+          <span class="step-badge step-badge--gray">🔒</span>
+          <div>
+            <h2>安全与限流</h2>
+            <p>防密码爆破与接口滥用；被锁的账号可在这里手工解锁</p>
+          </div>
+        </div>
+        <div class="panel-actions">
+          <el-button round :loading="rateLoading" @click="loadRate">刷新</el-button>
+        </div>
+      </div>
+
+      <div v-if="rate" class="rate-grid">
+        <div class="rate-cell">
+          <span class="rate-label">登录尝试</span>
+          <span class="rate-value">{{ rate.loginPerIpPerMin }} 次 / 分钟 / IP</span>
+        </div>
+        <div class="rate-cell">
+          <span class="rate-label">失败锁定</span>
+          <span class="rate-value">{{ rate.failLimit }} 次 → 锁 {{ rate.failLockMinutes }} 分钟</span>
+        </div>
+        <div class="rate-cell">
+          <span class="rate-label">普通请求</span>
+          <span class="rate-value">{{ rate.apiPerMin }} 次 / 分钟</span>
+        </div>
+        <div class="rate-cell">
+          <span class="rate-label">重操作</span>
+          <span class="rate-value">{{ rate.heavyPerHour }} 次 / 小时</span>
+        </div>
+      </div>
+
+      <div class="rate-locks">
+        <div class="rate-locks-head">
+          <span class="field-label">当前锁定</span>
+          <span class="ih-muted">{{ activeLocks.length }} 个生效中</span>
+          <el-button
+            v-if="activeLocks.length" link type="danger" class="field-head-btn"
+            @click="doClearRate"
+          >全部清空</el-button>
+        </div>
+        <div v-if="!activeLocks.length" class="ih-muted rate-empty">
+          没有账号被锁定。
+        </div>
+        <div v-for="l in activeLocks" :key="l.lock_key" class="rate-lock-row">
+          <code class="rate-lock-key">{{ l.lock_key }}</code>
+          <span class="ih-muted">{{ l.reason }}</span>
+          <span class="rate-lock-remain">剩余 {{ Math.ceil(l.remainSeconds / 60) }} 分钟</span>
+          <el-button link type="primary" size="small" @click="doUnlock(l.lock_key)">解锁</el-button>
+        </div>
+      </div>
+
+      <div class="ih-muted rate-hint">
+        阈值可在服务端配置项调整（rate.login_per_ip / rate.fail_limit / rate.api_per_min / rate.heavy_per_hour）。
+        重操作指改代码、定性、定级、拉模型等会消耗额度的接口。
+      </div>
+    </section>
+
     <!-- 外观 -->
     <section class="panel ih-card">
       <div class="panel-head">
@@ -323,9 +383,9 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
-  createChannel, createProject, deleteChannel, deleteProject, getChannels, getProjects,
-  getSettings, listChannelModels, mergeProjects, saveSettings, scanRepos, testChannel,
-  updateChannel, updateProject,
+  clearRate, createChannel, createProject, deleteChannel, deleteProject, getChannels,
+  getProjects, getRateStatus, getSettings, listChannelModels, mergeProjects, saveSettings,
+  scanRepos, testChannel, unlockRate, updateChannel, updateProject,
   type Channel, type Project, type ScanResult
 } from '../api'
 import { useTheme } from '../useTheme'
@@ -336,6 +396,38 @@ const isMobile = useMobile()
 const form = reactive<Record<string, any>>({})
 const rubricVersion = ref('')
 const saving = ref(false)
+
+/* ===== 安全与限流 ===== */
+const rate = ref<any>(null)
+const rateLoading = ref(false)
+
+const activeLocks = computed(() =>
+  ((rate.value?.locks || []) as any[]).filter((l) => l.active)
+)
+
+const loadRate = async () => {
+  rateLoading.value = true
+  try {
+    rate.value = await getRateStatus()
+  } catch {
+    rate.value = null
+  } finally {
+    rateLoading.value = false
+  }
+}
+
+const doUnlock = async (key: string) => {
+  await unlockRate(key)
+  await loadRate()
+  ElMessage.success('已解锁')
+}
+
+const doClearRate = async () => {
+  await ElMessageBox.confirm('清空所有限流计数与锁定？', '提示', { type: 'warning' })
+  await clearRate()
+  await loadRate()
+  ElMessage.success('已清空')
+}
 
 /* ===== AI 通道 ===== */
 const channels = ref<Channel[]>([])
@@ -621,6 +713,7 @@ onMounted(async () => {
   await load()
   await loadProjects()
   await loadChannels()
+  await loadRate()
 })
 </script>
 
@@ -667,6 +760,27 @@ onMounted(async () => {
 
 .tip { margin: 14px 0 0; font-size: 12px; color: var(--ih-sub); line-height: 1.7; }
 .tip code { background: var(--ih-soft-2); padding: 1px 6px; border-radius: 6px; color: var(--ih-ink); }
+
+/* ---------- 安全与限流 ---------- */
+.rate-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 16px; }
+.rate-cell {
+  background: var(--ih-soft); border: 1px solid var(--ih-line); border-radius: 10px;
+  padding: 10px 12px; display: flex; flex-direction: column; gap: 4px;
+}
+.rate-label { font-size: 11.5px; color: var(--ih-sub); }
+.rate-value { font-size: 13px; color: var(--ih-ink); font-weight: 500; }
+
+.rate-locks { display: flex; flex-direction: column; gap: 8px; }
+.rate-locks-head { display: flex; align-items: baseline; gap: 8px; }
+.rate-lock-row {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 8px 12px; border-radius: 10px; background: var(--ih-warn-soft);
+  font-size: 12px;
+}
+.rate-lock-key { color: var(--ih-warn-ink); font-size: 12px; }
+.rate-lock-remain { margin-left: auto; color: var(--ih-warn-ink); font-size: 11.5px; }
+.rate-empty { padding: 6px 0; }
+.rate-hint { margin-top: 12px; font-size: 11.5px; line-height: 1.6; }
 
 /* ---------- 项目（紧凑列表） ---------- */
 .scan-result { display: flex; flex-direction: column; gap: 10px; margin: 12px 0; }
