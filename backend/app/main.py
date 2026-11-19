@@ -14,7 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from . import auth as auth_mod
 from .config import ATTACH_DIR, FRONTEND_DIST
 from .db import init_db
-from .routers import ai, auth, channels, fix, issues, projects, report, settings
+from .routers import ai, auth, channels, fix, issues, projects, report, repos, settings
 from .routers.auth import OPEN_PATHS, auth_enabled, client_ip, current_user
 
 app = FastAPI(title="Issue Hub", version="0.1.0")
@@ -58,6 +58,7 @@ app.include_router(ai.router)
 app.include_router(fix.router)
 app.include_router(projects.router)
 app.include_router(channels.router)
+app.include_router(repos.router)
 app.include_router(report.router)
 app.include_router(settings.router)
 

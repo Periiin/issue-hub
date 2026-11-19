@@ -115,6 +115,35 @@
           </div>
         </div>
 
+        <!-- 用户仓库副本：多用户时每人一份，互不影响 -->
+        <div v-if="repoCopies.length" class="field-block">
+          <div class="field-head">
+            <span class="field-title">我的仓库副本</span>
+            <span class="ih-muted">{{ copyModeLabel }}</span>
+            <el-button
+              link type="primary" class="field-head-btn"
+              :loading="syncing" @click="doSyncAll"
+            >全部同步</el-button>
+          </div>
+          <div class="copy-list">
+            <div v-for="c in repoCopies" :key="c.source" class="copy-row">
+              <span class="copy-name">{{ repoName(c.source) }}</span>
+              <span v-if="!c.isCopy" class="copy-tag">共享</span>
+              <span v-else-if="!c.exists" class="copy-tag is-warn">未创建</span>
+              <span v-else class="copy-meta">
+                <code>{{ c.branch || '-' }}</code>
+                <span v-if="c.dirty" class="copy-tag is-warn">有未提交</span>
+                <span v-if="c.worktrees" class="copy-tag">{{ c.worktrees }} worktree</span>
+              </span>
+              <span v-if="c.exists && c.sizeMb != null" class="ih-muted copy-size">{{ c.sizeMb }}MB</span>
+              <el-button
+                v-if="c.isCopy && c.exists" link type="primary" size="small"
+                :loading="syncingOne === c.source" @click="doSyncOne(c.source)"
+              >同步</el-button>
+            </div>
+          </div>
+        </div>
+
         <!-- 对话记忆：挂在问题上，换通道也不丢 -->
         <div class="field-block">
           <div class="field-head">
@@ -347,8 +376,9 @@ import { useTheme } from '../useTheme'
 import { useMobile } from '../useMobile'
 import {
   acceptFix, applyFix, clearMemory, getCodeRoots, getFixContext, getFixDiff, getMemory,
-  patchIssue, regenerateFixContext, rejectFix, runFix, saveFixContext, verifyFix,
-  type CodeRoot, type MemorySession, type TargetRepo, type FixAttempt
+  getRepoCopies, patchIssue, regenerateFixContext, rejectFix, runFix, saveFixContext,
+  syncAllRepoCopies, syncRepoCopy, verifyFix,
+  type CodeRoot, type MemorySession, type RepoCopy, type TargetRepo, type FixAttempt
 } from '../api'
 
 const props = defineProps<{
@@ -389,6 +419,56 @@ const verifying = ref(false)
 
 const attempts = ref<FixAttempt[]>([])
 const openAttempts = ref<number[]>([])
+
+/* ===== 用户仓库副本 ===== */
+const repoCopies = ref<RepoCopy[]>([])
+const copyMode = ref<'copy' | 'shared'>('shared')
+const syncing = ref(false)
+const syncingOne = ref('')
+
+const copyModeLabel = computed(() =>
+  copyMode.value === 'copy' ? '每人一份，互不影响' : '单人模式，直接用源仓库')
+
+const repoName = (path: string) => (path || '').split(/[\\/]/).pop() || path
+
+const loadCopies = async () => {
+  const r = await getRepoCopies().catch(() => null)
+  if (r) {
+    repoCopies.value = r.copies || []
+    copyMode.value = r.mode
+  }
+}
+
+const doSyncOne = async (source: string) => {
+  syncingOne.value = source
+  try {
+    const r = await syncRepoCopy(source)
+    if (r?.ok === false) ElMessage.warning(r.reason || r.error || '同步失败')
+    else if (r?.skipped) ElMessage.info(r.reason || '已跳过')
+    else ElMessage.success('已同步到最新')
+    await loadCopies()
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.detail || '同步失败')
+  } finally {
+    syncingOne.value = ''
+  }
+}
+
+const doSyncAll = async () => {
+  syncing.value = true
+  try {
+    const r = await syncAllRepoCopies()
+    const results = Object.values(r?.results || {}) as any[]
+    const bad = results.filter((x) => x?.ok === false)
+    if (bad.length) ElMessage.warning(`${bad.length} 个仓库同步失败：${bad[0]?.reason || bad[0]?.error || ''}`)
+    else ElMessage.success('全部同步完成')
+    await loadCopies()
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.detail || '同步失败')
+  } finally {
+    syncing.value = false
+  }
+}
 
 /* ===== 对话记忆 ===== */
 const memorySessions = ref<MemorySession[]>([])
@@ -781,6 +861,7 @@ onMounted(async () => {
   syncFromIssue()
   await loadContext()
   await loadMemory()
+  await loadCopies()
 })
 </script>
 
@@ -913,6 +994,22 @@ onMounted(async () => {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 11px; line-height: 1.5; white-space: pre-wrap; color: var(--ih-ink);
 }
+
+/* 仓库副本 */
+.copy-list { display: flex; flex-direction: column; gap: 4px; }
+.copy-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 10px; border-radius: 8px; background: var(--ih-soft); font-size: 12px;
+}
+.copy-name { flex: 0 0 auto; font-weight: 500; color: var(--ih-ink); }
+.copy-meta { display: flex; align-items: center; gap: 6px; color: var(--ih-sub); }
+.copy-meta code { font-size: 11px; }
+.copy-tag {
+  padding: 1px 7px; border-radius: 999px; font-size: 11px;
+  background: var(--ih-soft-2); color: var(--ih-sub);
+}
+.copy-tag.is-warn { background: var(--ih-warn-soft); color: var(--ih-warn-ink); }
+.copy-size { margin-left: auto; font-size: 11px; }
 
 /* 对话记忆 */
 .mem-list { display: flex; flex-direction: column; gap: 4px; }

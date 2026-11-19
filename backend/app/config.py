@@ -50,6 +50,8 @@ DEFAULT_SETTINGS = {
     "auth.enabled": "0",
     # IP 白名单：一行一个，支持 CIDR（如 192.168.110.0/24）与单个 IP。空=不限制
     "auth.ip_allowlist": "",
+    # 验证时是否允许联网（npm/maven 下载依赖需要）。0=断网更安全但依赖未缓存会失败
+    "verify.allow_network": "1",
     # 可信反代地址：只有来自这些 IP 的请求，X-Forwarded-For 才被采信。
     # 回环与常见 docker 网关已内置，额外加 nginx 的地址写这里（逗号或换行分隔）
     "auth.trusted_proxies": "",

@@ -17,3 +17,6 @@ worktrees/
 # 杂项
 .DS_Store
 *.log
+
+# 用户仓库副本（多用户部署时生成，体积大）
+repos/

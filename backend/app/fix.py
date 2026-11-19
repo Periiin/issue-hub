@@ -12,6 +12,7 @@ import subprocess
 from pathlib import Path
 
 from .config import BASE_DIR
+from . import repos as repos_mod
 from .db import get_settings
 
 WORKTREES_DIR = BASE_DIR / "worktrees"
@@ -105,9 +106,21 @@ def branch_name(issue_id: int, repo: str | None = None,
 
 
 def create_worktree(repo: str, issue_id: int, owner_id: int | None = None) -> dict:
-    """在 repo 上建独立 worktree，返回位置信息。"""
+    """在**用户副本**上建独立 worktree，返回位置信息。
+
+    多用户时 repo 是管理员配的源仓库路径，真正的操作对象是用户自己的副本：
+    这样 A 的合并不会影响 B 的基线，两人的 diff 互不污染。
+    owner 为空（单人本机）时直接用源仓库，不复制。
+    """
     if not is_repo_root(repo):
         raise FixError(f"{repo} 不是 git 仓库根目录，不能作为修改目标")
+
+    try:
+        copy = repos_mod.ensure_copy(repo, owner_id)
+    except repos_mod.RepoError as ex:
+        raise FixError(str(ex))
+    work_repo = copy["path"]
+
     wt = worktree_path(issue_id, repo, owner_id)
     branch = branch_name(issue_id, repo, owner_id)
     WORKTREES_DIR.mkdir(parents=True, exist_ok=True)
@@ -115,16 +128,18 @@ def create_worktree(repo: str, issue_id: int, owner_id: int | None = None) -> di
 
     # 清理上一次的残留（重复点「开始修改」时）
     if wt.exists():
-        _git(["worktree", "remove", "--force", str(wt)], repo)
+        _git(["worktree", "remove", "--force", str(wt)], work_repo)
         shutil.rmtree(wt, ignore_errors=True)
-    _git(["worktree", "prune"], repo)
-    _git(["branch", "-D", branch], repo)
+    _git(["worktree", "prune"], work_repo)
+    _git(["branch", "-D", branch], work_repo)
 
-    code, out, err = _git(["worktree", "add", "-b", branch, str(wt), "HEAD"], repo)
+    code, out, err = _git(["worktree", "add", "-b", branch, str(wt), "HEAD"], work_repo)
     if code != 0:
         raise FixError(f"创建 worktree 失败：{err or out}")
-    return {"worktree": str(wt), "branch": branch, "repo": repo,
-            "base_branch": current_branch(repo), "base_commit": _head(repo)}
+    return {"worktree": str(wt), "branch": branch, "repo": work_repo,
+            "source": repo, "isCopy": copy.get("isCopy", False),
+            "copyCreated": copy.get("created", False),
+            "base_branch": current_branch(work_repo), "base_commit": _head(work_repo)}
 
 
 def _head(repo: str) -> str:
@@ -174,13 +189,18 @@ def merge_to_base(repo: str, branch: str) -> dict:
 
 
 def drop_worktree(repo: str, issue_id: int, owner_id: int | None = None) -> None:
-    """清理单个仓库的 worktree + 分支，并顺手删掉空的 issue 目录。"""
+    """清理单个仓库的 worktree + 分支，并顺手删掉空的 issue 目录。
+
+    worktree 挂在用户副本上，所以 git 操作要指向副本；副本可能已被删，
+    那就直接删目录。
+    """
     wt = worktree_path(issue_id, repo, owner_id)
     branch = branch_name(issue_id, repo, owner_id)
-    if Path(repo).exists():
-        _git(["worktree", "remove", "--force", str(wt)], repo)
-        _git(["worktree", "prune"], repo)
-        _git(["branch", "-D", branch], repo)
+    work_repo = str(repos_mod.copy_path(owner_id, repo))
+    if Path(work_repo).exists():
+        _git(["worktree", "remove", "--force", str(wt)], work_repo)
+        _git(["worktree", "prune"], work_repo)
+        _git(["branch", "-D", branch], work_repo)
     shutil.rmtree(wt, ignore_errors=True)
     # issue-<id> 目录空了就一起删掉，避免留一堆空目录
     base = worktree_path(issue_id, None, owner_id)

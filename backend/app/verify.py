@@ -19,6 +19,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from .db import get_settings
+
 # 输出截断：编译失败的完整日志可能有几万行，只留尾部
 MAX_OUTPUT = 6_000
 DEFAULT_TIMEOUT = 420   # 7 分钟：Maven 冷启动编译足够
@@ -101,7 +103,8 @@ def changed_build_files(worktree: str) -> list[str]:
     return hit
 
 
-def _wrap_sandbox(repo: str, argv: list[str], sandbox: bool) -> tuple[list[str], str]:
+def _wrap_sandbox(repo: str, argv: list[str], sandbox: bool,
+                  allow_network: bool = False) -> tuple[list[str], str]:
     """给命令套上 bwrap。返回 (最终 argv, 说明)。
 
     断网（--unshare-net）是刻意的：验证只需要读本地依赖编译，
@@ -122,7 +125,13 @@ def _wrap_sandbox(repo: str, argv: list[str], sandbox: bool) -> tuple[list[str],
         "--ro-bind", "/", "/",          # 整个文件系统只读
         "--dev", "/dev",
         "--proc", "/proc",
-        "--unshare-net",                # 断网
+    ]
+    # 联网开关：验证时 npm/maven 可能要下载依赖。
+    # 默认允许（多用户各自副本首次构建几乎必然要联网），
+    # 想更严就设 verify.allow_network=0，代价是依赖未缓存会失败。
+    if not allow_network:
+        args.append("--unshare-net")
+    args += [
         "--unshare-pid",
         "--unshare-ipc",
         "--unshare-uts",
@@ -147,7 +156,7 @@ def _wrap_sandbox(repo: str, argv: list[str], sandbox: bool) -> tuple[list[str],
 
 
 def run_verify(repo: str, cmd: str, timeout: int = DEFAULT_TIMEOUT,
-               sandbox: bool = True) -> dict:
+               sandbox: bool = True, allow_network: bool | None = None) -> dict:
     """执行验证命令，返回结果（不抛异常，由调用方决定是否阻断）。
 
     注意：`sandbox=False` 只跳过 bwrap，**仍然不用 shell**。
@@ -164,7 +173,9 @@ def run_verify(repo: str, cmd: str, timeout: int = DEFAULT_TIMEOUT,
     if not argv:
         return {"ok": None, "skipped": True, "reason": "命令为空"}
 
-    full_argv, mode = _wrap_sandbox(repo, argv, sandbox)
+    if allow_network is None:
+        allow_network = (get_settings().get("verify.allow_network") or "1").strip() in ("1", "true", "yes")
+    full_argv, mode = _wrap_sandbox(repo, argv, sandbox, allow_network)
 
     try:
         proc = subprocess.run(
@@ -203,7 +214,8 @@ def run_verify(repo: str, cmd: str, timeout: int = DEFAULT_TIMEOUT,
 
 
 def verify_worktree(repo: str, worktree: str, project_verify_cmd: str = "",
-                    timeout: int = DEFAULT_TIMEOUT, sandbox: bool = True) -> dict:
+                    timeout: int = DEFAULT_TIMEOUT, sandbox: bool = True,
+                    allow_network: bool | None = None) -> dict:
     """验证 worktree。
 
     cwd 用 worktree 而不是 repo —— 要看的是「这次改动后」能不能编译，
@@ -227,7 +239,8 @@ def verify_worktree(repo: str, worktree: str, project_verify_cmd: str = "",
             }
 
     cmd = (project_verify_cmd or "").strip() or detect_verify_cmd(worktree)
-    result = run_verify(worktree, cmd, timeout, sandbox=sandbox)
+    result = run_verify(worktree, cmd, timeout, sandbox=sandbox,
+                        allow_network=allow_network)
     result["repo"] = repo
     result["worktree"] = worktree
     result["detected"] = not explicit

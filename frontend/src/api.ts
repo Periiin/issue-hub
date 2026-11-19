@@ -337,3 +337,27 @@ export const clearMemory = (issueId: number, kind = '') =>
 export const verifyFix = (id: number, repo = '') =>
   api.post(`/issues/${id}/fix/verify`, {}, { params: repo ? { repo } : {}, timeout: 600000 })
     .then((r) => r.data)
+
+// ---------- 用户仓库副本 ----------
+
+export interface RepoCopy {
+  path: string
+  source: string
+  exists: boolean
+  isCopy: boolean
+  head?: string
+  branch?: string
+  worktrees?: number
+  dirty?: boolean
+  sizeMb?: number
+}
+
+export const getRepoCopies = () =>
+  api.get<{ copies: RepoCopy[]; totalMb: number; mode: 'copy' | 'shared' }>('/repos')
+    .then((r) => r.data)
+
+export const syncRepoCopy = (source: string) =>
+  api.post(`/repos/sync`, null, { params: { source }, timeout: 300000 }).then((r) => r.data)
+
+export const syncAllRepoCopies = () =>
+  api.post('/repos/sync-all', null, { timeout: 600000 }).then((r) => r.data)
