@@ -88,6 +88,11 @@ def _startup() -> None:
         rl.purge_old(days=2)
     except Exception:
         pass
+    # 登录记录留半年，再老的删掉（审计够用又不无限长）
+    try:
+        auth_mod.purge_login_logs(keep_days=180)
+    except Exception:
+        pass
     # 没有用户时建 admin 并把初始密码打到日志（只打一次）
     initial = auth_mod.ensure_admin()
     if initial:

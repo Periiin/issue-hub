@@ -154,6 +154,22 @@ CREATE TABLE IF NOT EXISTS app_session (
 );
 CREATE INDEX IF NOT EXISTS idx_app_session_user ON app_session(user_id);
 
+-- 登录记录：成功/失败/登出都记一条，带 IP 与归属地（审计用）
+-- 和 app_session 分开：会话会过期被清，登录历史要留着
+CREATE TABLE IF NOT EXISTS app_login_log (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id     INTEGER,              -- 失败且用户不存在时为空
+    username    TEXT NOT NULL,        -- 按输入的原样记（失败时才知道试的什么名）
+    result      TEXT NOT NULL,        -- ok / bad_password / no_user / disabled / locked / logout
+    ip          TEXT,
+    ip_region   TEXT,                 -- 「中国 江苏省 南京市」这类，查不到就空
+    user_agent  TEXT,
+    note        TEXT,
+    created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_login_log_time ON app_login_log(created_at);
+CREATE INDEX IF NOT EXISTS idx_login_log_user ON app_login_log(user_id);
+
 -- 限流计数：固定窗口（按分钟/小时对齐），bucket+key+窗口 唯一。
 -- 用库而不是内存：多 worker / 重启都不丢计数。
 CREATE TABLE IF NOT EXISTS rate_counter (

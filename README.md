@@ -273,9 +273,29 @@ POST /api/issues/{id}/fix/reject  丢弃 worktree 与分支
 ```
 data/issuehub.db          SQLite 主库（备份就拷这个文件）
 data/attachments/<id>/    截图、PDF
+data/issue-context/       每个 issue 一份「修复边界」Markdown
+backend/app/data/         ip2region 离线 IP 库（11MB，随仓库走）
 ```
 
-> 无登录鉴权，默认只在内网用。要挂到公网请先套 nginx basic auth 或加访问令牌。
+## 多用户与审计
+
+鉴权默认**关闭**（单人本机用，后端视所有请求为 admin）。要多人一起用就在
+「设置 → 其他代码设置」里打开登录，然后：
+
+- **用户**：管理员在「设置 → 账号 → 用户管理」里建人、改密码、停用、删除。
+  每人只看到自己的问题 / 项目 / 通道（`owner_id` 隔离，越权返 404 不返 403）。
+- **IP 白名单**：一行一个，支持 CIDR。**每次请求**都校验，不只是登录时。
+  挂 nginx 后必须把反代 IP 写进 `auth.trusted_proxies`，否则白名单拿到的是
+  nginx 的 IP（`X-Forwarded-For` 只对可信反代采信，防伪造）。
+- **登录记录**：成功 / 密码错误 / 用户不存在 / 已停用 / 被锁 / IP 不在白名单 /
+  退出登录，全部落 `app_login_log`，带 IP、**归属地**、客户端 UA、时间。
+  在「设置 → 账号 → 登录记录」里看，可按用户名 / IP / 归属地搜，按结果筛，可清空。
+- **限流**：登录频率（IP 维度）、失败锁定（IP+用户名，默认 5 次锁 15 分钟）、
+  通用 API 频率、重操作（改代码/分析/拉模型）每小时上限。阈值都在设置里。
+
+归属地用自带的离线库 `backend/app/data/ip2region_v4.xdb`（11MB，ip2region，
+Apache-2.0），解析器是纯标准库手写的（`backend/app/geoip.py`），不联网、不加依赖。
+内网 IP 直接标「内网」「本机」。库缺失时归属地留空，不影响登录。
 
 ## API（前端用到的都在这里）
 
@@ -294,6 +314,19 @@ POST   /api/issues/{id}/fix               {provider?}  → 修复方案
 GET    /api/issues/{id}/export            Markdown
 GET    /api/report/weekly                 周报
 GET/PUT /api/settings
+
+GET    /api/auth/mode                     要不要显示登录页
+POST   /api/auth/login | /logout
+GET    /api/auth/me
+GET    /api/auth/users                    用户列表（管理员）
+POST   /api/auth/users                    新建用户（管理员）
+PATCH  /api/auth/users/{id}               改密码（自己或管理员）
+POST   /api/auth/users/{id}/enabled       停用/启用（管理员）
+DELETE /api/auth/users/{id}               删除（管理员，不能删自己）
+GET    /api/auth/login-logs               登录记录，支持 keyword/result/username + 分页
+DELETE /api/auth/login-logs               清空登录记录（管理员）
+GET    /api/auth/rate/status              限流配置与当前锁定
+POST   /api/auth/rate/unlock | /clear
 ```
 
 ## 目录
@@ -312,7 +345,5 @@ frontend/src/
 
 ## 下一步（还没做）
 
-- 「操作解决」接 worktree：建分支 → agent 改代码 → 出 diff → 人工采纳才合并
-- MCP server：让 ZCode 会话直接读写 issue 库（现在只能通过网页/API）
-- 附件 OCR / 多模态读图（目前 claude/dsh 能读图，deepseek 只能看文字）
-- 简单鉴权、甲方只读分享链接
+- 甲方只读分享链接（带 token 的只读视图，让客户自己看进度）
+- 登录记录导出 CSV

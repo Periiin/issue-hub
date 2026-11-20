@@ -117,21 +117,36 @@ def login(payload: LoginReq, request: Request):
     if not auth_enabled():
         raise HTTPException(400, "当前未开启登录")
     ip = client_ip(request)
+    ua = request.headers.get("user-agent") or ""
+    username = payload.username.strip()
+
+    def fail(result: str, user_id: int | None = None, note: str = ""):
+        """失败统一走这里：先落审计，再抛。避免每个分支都写一遍。"""
+        auth.record_login(username, result, ip, user_id, ua, note)
+
     if not auth.ip_allowed(ip):
+        fail("bad_ip", note="IP 不在白名单")
         raise HTTPException(403, f"IP {ip} 不在白名单内")
 
-    username = payload.username.strip()
     # 限流前置：IP 频率 + 该 IP+用户名 是否被锁
     try:
         rl.check_login(ip, username)
     except rl.RateLimited as ex:
+        fail("locked", note=str(ex))
         raise HTTPException(429, str(ex),
                             headers={"Retry-After": str(ex.retry_after)})
 
     row = auth.get_user_by_name(username)
-    if not row or not auth.verify_password(payload.password, row["password_hash"]):
-        # 记失败：连续 N 次就锁
+    if not row:
+        fail("no_user")
+        # 照样计失败次数：否则「用户不存在」能无限试，等于免费爆破探针
+        rl.record_failure(ip, username)
+        left = max(0, rl._cfg_int("rate.fail_limit", rl.DEFAULT_FAIL_LIMIT) - 1)
+        raise HTTPException(401, f"用户名或密码不正确（还可尝试 {left} 次）")
+
+    if not auth.verify_password(payload.password, row["password_hash"]):
         info = rl.record_failure(ip, username)
+        fail("bad_password", row["id"])
         if info["locked"]:
             raise HTTPException(
                 429,
@@ -143,11 +158,13 @@ def login(payload: LoginReq, request: Request):
         raise HTTPException(401, f"用户名或密码不正确（还可尝试 {left} 次）")
 
     if not row.get("enabled"):
+        fail("disabled", row["id"])
         raise HTTPException(403, "该账号已被停用")
 
     # 成功：清掉失败计数
     rl.clear_failures(ip, username)
     session = auth.create_session(row["id"], ip)
+    auth.record_login(username, "ok", ip, row["id"], ua)
     return {
         "token": session["token"],
         "expiresAt": session["expiresAt"],
@@ -161,6 +178,10 @@ def login(payload: LoginReq, request: Request):
 def logout(request: Request):
     token = (request.headers.get("authorization") or "").replace("Bearer ", "").strip()
     if token:
+        user = auth.get_session_user(token)
+        if user:
+            auth.record_login(user["username"], "logout", client_ip(request),
+                              user["id"], request.headers.get("user-agent") or "")
         auth.delete_session(token)
     return {"ok": True}
 
@@ -216,6 +237,25 @@ def remove_user(user_id: int, request: Request):
         raise HTTPException(400, "不能删除自己")
     auth.delete_user(user_id)
     return {"ok": True}
+
+
+@router.get("/login-logs")
+def login_logs(request: Request, limit: int = 50, offset: int = 0,
+               username: str = "", result: str = "", keyword: str = ""):
+    """登录记录（管理员）。按时间倒序，可按用户名/结果/关键词过滤。"""
+    require_admin(request)
+    limit = max(1, min(limit, 200))
+    return auth.list_login_logs(limit=limit, offset=max(0, offset),
+                                username=username.strip(), result=result.strip(),
+                                keyword=keyword.strip())
+
+
+@router.delete("/login-logs")
+def clear_login_logs(request: Request):
+    """清空登录记录（管理员）。keep_days=0 表示全清。"""
+    require_admin(request)
+    n = auth.purge_login_logs(keep_days=0)
+    return {"ok": True, "deleted": n}
 
 
 # ---------------- 限流管理（管理员） ----------------

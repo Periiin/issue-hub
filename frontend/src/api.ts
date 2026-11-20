@@ -70,6 +70,31 @@ export const toggleUser = (userId: number, enabled: boolean) =>
 export const deleteUser = (userId: number) =>
   api.delete(`/auth/users/${userId}`).then((r) => r.data)
 
+/** 一条登录记录 */
+export interface LoginLog {
+  id: number
+  user_id: number | null
+  username: string
+  result: string
+  resultLabel: string
+  success: boolean
+  ip: string
+  ip_region: string
+  user_agent: string
+  note: string
+  created_at: string
+  display_name?: string | null
+  role?: string | null
+}
+
+export const getLoginLogs = (params: {
+  limit?: number; offset?: number; username?: string; result?: string; keyword?: string
+} = {}) =>
+  api.get<{ items: LoginLog[]; total: number; limit: number; offset: number }>(
+    '/auth/login-logs', { params }).then((r) => r.data)
+
+export const clearLoginLogs = () => api.delete('/auth/login-logs').then((r) => r.data)
+
 export interface Issue {
   id: number
   title: string

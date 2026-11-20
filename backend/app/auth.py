@@ -135,6 +135,89 @@ def delete_user(user_id: int) -> None:
         conn.execute("DELETE FROM app_session WHERE user_id = ?", (user_id,))
 
 
+# ---------------- 登录记录 ----------------
+
+# result 取值 → 给人看的文案（前端也有一份，这里只给导出/日志用）
+RESULT_LABELS = {
+    "ok": "登录成功",
+    "bad_password": "密码错误",
+    "no_user": "用户不存在",
+    "disabled": "账号已停用",
+    "locked": "被限流锁定",
+    "bad_ip": "IP 不在白名单",
+    "logout": "退出登录",
+}
+
+
+def record_login(username: str, result: str, ip: str = "", user_id: int | None = None,
+                 user_agent: str = "", note: str = "") -> int:
+    """写一条登录记录。
+
+    归属地在这里查：登录不是高频操作，查表微秒级，不会拖慢响应。
+    查不到归属地不影响记录本身 —— 审计里 IP 才是关键信息。
+    """
+    from . import geoip
+
+    region = ""
+    try:
+        region = geoip.lookup(ip).get("text", "")
+    except Exception:
+        # 归属地库缺失/损坏绝不能让登录流程挂掉
+        region = ""
+
+    with connect() as conn:
+        cur = conn.execute(
+            "INSERT INTO app_login_log(user_id, username, result, ip, ip_region, "
+            "user_agent, note, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (user_id, (username or "").strip(), result, ip, region,
+             (user_agent or "")[:300], note, now()))
+        return cur.lastrowid
+
+
+def list_login_logs(limit: int = 50, offset: int = 0, username: str = "",
+                    result: str = "", keyword: str = "") -> dict:
+    """分页查登录记录，可按用户名/结果/关键词（IP、归属地）过滤。"""
+    where: list[str] = []
+    params: list = []
+    if username:
+        where.append("l.username = ?")
+        params.append(username)
+    if result:
+        where.append("l.result = ?")
+        params.append(result)
+    if keyword:
+        where.append("(l.username LIKE ? OR l.ip LIKE ? OR l.ip_region LIKE ?)")
+        like = f"%{keyword}%"
+        params += [like, like, like]
+
+    clause = ("WHERE " + " AND ".join(where)) if where else ""
+    with connect() as conn:
+        total = conn.execute(
+            f"SELECT COUNT(*) AS c FROM app_login_log l {clause}", params).fetchone()["c"]
+        rows = conn.execute(
+            f"SELECT l.id, l.user_id, l.username, l.result, l.ip, l.ip_region, "
+            f"l.user_agent, l.note, l.created_at, u.display_name, u.role "
+            f"FROM app_login_log l LEFT JOIN app_user u ON u.id = l.user_id "
+            f"{clause} ORDER BY l.id DESC LIMIT ? OFFSET ?",
+            [*params, limit, offset]).fetchall()
+
+    items = []
+    for r in rows:
+        d = dict(r)
+        d["resultLabel"] = RESULT_LABELS.get(d["result"], d["result"])
+        d["success"] = d["result"] in ("ok", "logout")
+        items.append(d)
+    return {"items": items, "total": total, "limit": limit, "offset": offset}
+
+
+def purge_login_logs(keep_days: int = 180) -> int:
+    """删掉太老的登录记录，避免无限增长。默认留半年。"""
+    cutoff = (datetime.now() - timedelta(days=keep_days)).strftime("%Y-%m-%d %H:%M:%S")
+    with connect() as conn:
+        return conn.execute("DELETE FROM app_login_log WHERE created_at < ?",
+                            (cutoff,)).rowcount
+
+
 # ---------------- 会话 ----------------
 
 def create_session(user_id: int, ip: str = "") -> dict:
