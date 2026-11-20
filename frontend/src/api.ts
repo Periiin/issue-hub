@@ -323,6 +323,31 @@ export interface FixAttempt {
 
 // ---------- 项目 ----------
 
+/** Magpie 里的一个模型 */
+export interface MagpieModel {
+  id: string
+  label: string
+  contextLength: number
+  tools: boolean
+  vision: boolean
+}
+
+export interface MagpieDetect {
+  found: boolean
+  running: boolean
+  baseUrl: string
+  version: string
+  models: MagpieModel[]
+  error: string
+}
+
+export const detectMagpie = () =>
+  api.get<MagpieDetect>('/channels/magpie/detect').then((r) => r.data)
+
+export const importMagpieModels = (models: string[]) =>
+  api.post<{ ok: boolean; created: string[]; skipped: string[]; baseUrl: string }>(
+    '/channels/magpie/import', { models }).then((r) => r.data)
+
 export interface Project {
   id: number
   name: string

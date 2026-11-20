@@ -307,6 +307,17 @@ class ApiChannelProvider:
                 text = content
                 break
 
+            # 快没轮数了就先提醒模型收尾。
+            # 真实模型（尤其会主动读代码的）会一直探索到上限，最后一条是 tool
+            # 消息、没有 content，等于白跑几分钟还拿不到结论。
+            left = self.max_rounds - rounds
+            if left == 2:
+                messages.append({
+                    "role": "user",
+                    "content": "【提醒】工具调用轮数即将用完，请立即停止继续读取文件，"
+                               "基于目前已掌握的信息直接给出最终结论（按要求的 JSON 格式）。",
+                })
+
             # 把助手的工具调用意图原样带回（OpenAI 要求）
             messages.append({
                 "role": "assistant",
@@ -336,9 +347,17 @@ class ApiChannelProvider:
                     "content": output[:memory.MAX_TOOL_CHARS],
                 })
         else:
-            # 用完轮数还没收敛：把已有内容当结论，并提示模型可能没做完
-            text = (messages[-1].get("content") or "") if messages else ""
-            text = f"（达到工具调用上限 {self.max_rounds} 轮，以下可能不完整）\n{text}"
+            # 用完轮数还没收敛：从后往前找最后一条有内容的 assistant 消息。
+            # 不能直接取 messages[-1] —— 那条通常是 tool 结果（没有 content），
+            # 或者是一条空的 assistant（只带 tool_calls），取到的是空串。
+            tail = ""
+            for m in reversed(messages):
+                if m.get("role") == "assistant" and (m.get("content") or "").strip():
+                    tail = m["content"]
+                    break
+            text = (f"（达到工具调用上限 {self.max_rounds} 轮，以下可能不完整）\n{tail}"
+                    if tail else
+                    f"（达到工具调用上限 {self.max_rounds} 轮，模型未给出结论）")
 
         # ===== 记忆：写回 =====
         # 只存「干净的对话轮」：user 提问 + assistant 最终结论。

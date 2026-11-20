@@ -249,6 +249,7 @@
           </div>
         </div>
         <div class="panel-actions">
+          <el-button round :loading="magpieLoading" @click="openMagpie">从本地 Magpie 导入</el-button>
           <el-button round @click="openCreateChannel">＋ 新建通道</el-button>
         </div>
       </div>
@@ -306,6 +307,66 @@
     <AccountPanel v-if="me?.role === 'admin'" />
 
 
+
+    <!-- 从本地 Magpie 导入 -->
+    <el-drawer
+      v-model="magpieDrawer" title="从本地 Magpie 导入"
+      :size="isMobile ? '100%' : '620px'" append-to-body
+    >
+      <div v-if="magpieError" class="magpie-error">
+        <b>没能连上 Magpie</b>
+        <p>{{ magpieError }}</p>
+        <el-button size="small" round @click="loadMagpie">重试</el-button>
+      </div>
+
+      <template v-else-if="magpie">
+        <div class="magpie-head">
+          <div class="magpie-meta">
+            <span class="magpie-ok">已连接</span>
+            <code>{{ magpie.baseUrl }}</code>
+            <span v-if="magpie.version" class="ih-muted">v{{ magpie.version }}</span>
+          </div>
+          <p class="field-hint">
+            选中要用的模型，会各建一条通道。Magpie 是本机网关、不校验 Key，
+            导入后不用填任何凭证。
+          </p>
+        </div>
+
+        <div class="magpie-toolbar">
+          <el-checkbox
+            :model-value="magpiePick.length === magpie.models.length && magpie.models.length > 0"
+            :indeterminate="magpiePick.length > 0 && magpiePick.length < magpie.models.length"
+            @change="toggleAllMagpie"
+          >全选</el-checkbox>
+          <span class="ih-muted">已选 {{ magpiePick.length }} / {{ magpie.models.length }}</span>
+        </div>
+
+        <div class="magpie-list">
+          <label v-for="m in magpie.models" :key="m.id" class="magpie-item">
+            <el-checkbox :model-value="magpiePick.includes(m.id)" @change="toggleMagpie(m.id)" />
+            <div class="magpie-item-main">
+              <div class="magpie-item-name">{{ m.label }}</div>
+              <div class="magpie-item-id">{{ m.id }}</div>
+            </div>
+            <div class="magpie-badges">
+              <span v-if="m.tools" class="mbadge mbadge--ok" title="支持 function calling，能用来改代码">改代码</span>
+              <span v-if="m.vision" class="mbadge" title="能看图">看图</span>
+              <span v-if="m.contextLength" class="mbadge mbadge--ghost">{{ Math.round(m.contextLength / 1000) }}k</span>
+            </div>
+          </label>
+        </div>
+      </template>
+
+      <el-skeleton v-else :rows="5" animated />
+
+      <template #footer>
+        <el-button @click="magpieDrawer = false">取消</el-button>
+        <el-button
+          type="primary" :loading="magpieImporting"
+          :disabled="!magpiePick.length" @click="doMagpieImport"
+        >导入 {{ magpiePick.length }} 个</el-button>
+      </template>
+    </el-drawer>
 
     <!-- 通道编辑抽屉 -->
     <el-drawer v-model="chDrawer" :title="chForm.id ? '编辑通道' : '新建通道'" :size="isMobile ? '100%' : '620px'" append-to-body>
@@ -389,10 +450,10 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   changePassword, clearRate, createChannel, createProject,
-  deleteChannel, deleteProject, getChannels, getMe, getProjects, getRateStatus, getSettings,
-  listChannelModels, mergeProjects, saveSettings,
+  deleteChannel, deleteProject, detectMagpie, getChannels, getMe, getProjects, getRateStatus,
+  getSettings, importMagpieModels, listChannelModels, mergeProjects, saveSettings,
   scanRepos, testChannel, toggleUser, unlockRate, updateChannel, updateProject,
-  type AuthUser, type Channel, type Project, type ScanResult
+  type AuthUser, type Channel, type MagpieDetect, type Project, type ScanResult
 } from '../api'
 import AccountPanel from './AccountPanel.vue'
 import { useTheme } from '../useTheme'
@@ -413,6 +474,69 @@ const rateLoading = ref(false)
 const activeLocks = computed(() =>
   ((rate.value?.locks || []) as any[]).filter((l) => l.active)
 )
+
+/* ---------- 从本地 Magpie 导入 ---------- */
+const magpieDrawer = ref(false)
+const magpieLoading = ref(false)
+const magpieImporting = ref(false)
+const magpie = ref<MagpieDetect | null>(null)
+const magpieError = ref('')
+const magpiePick = ref<string[]>([])
+
+const loadMagpie = async () => {
+  magpieLoading.value = true
+  magpieError.value = ''
+  try {
+    const d = await detectMagpie()
+    if (!d.running) {
+      magpieError.value = d.error || 'Magpie 没有运行'
+      magpie.value = null
+    } else {
+      magpie.value = d
+      // 默认只选「能改代码」的，避免一上来全选一堆用不上的
+      magpiePick.value = d.models.filter((m) => m.tools).map((m) => m.id)
+    }
+  } catch (e: any) {
+    magpieError.value = e?.response?.data?.detail || e?.message || '探测失败'
+    magpie.value = null
+  } finally {
+    magpieLoading.value = false
+  }
+}
+
+const openMagpie = async () => {
+  magpieDrawer.value = true
+  await loadMagpie()
+}
+
+const toggleMagpie = (id: string) => {
+  magpiePick.value = magpiePick.value.includes(id)
+    ? magpiePick.value.filter((x) => x !== id)
+    : [...magpiePick.value, id]
+}
+
+const toggleAllMagpie = (checked: any) => {
+  magpiePick.value = checked && magpie.value
+    ? magpie.value.models.map((m) => m.id)
+    : []
+}
+
+const doMagpieImport = async () => {
+  magpieImporting.value = true
+  try {
+    const r = await importMagpieModels(magpiePick.value)
+    const skipped = r.skipped?.length || 0
+    ElMessage.success(
+      `已导入 ${r.created.length} 个` + (skipped ? `，${skipped} 个之前导过已跳过` : '')
+    )
+    magpieDrawer.value = false
+    await loadChannels()
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.detail || '导入失败')
+  } finally {
+    magpieImporting.value = false
+  }
+}
 
 const loadRate = async () => {
   rateLoading.value = true
@@ -730,6 +854,82 @@ onMounted(async () => {
 </script>
 
 <style scoped>
+
+/* ===== AI 通道卡片 ===== */
+.ch-list { display: flex; flex-direction: column; gap: 8px; }
+.ch-card {
+  padding: 10px 12px; border-radius: 12px;
+  border: 1px solid var(--ih-line); background: var(--ih-surface);
+}
+.ch-card.is-default { border-color: var(--ih-primary); }
+.ch-head {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  gap: 10px; flex-wrap: wrap;
+}
+.ch-title { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; min-width: 0; }
+.ch-title b { font-size: 13.5px; color: var(--ih-ink); }
+.ch-kind {
+  font-size: 10px; padding: 1px 7px; border-radius: 999px;
+  background: var(--ih-chip); color: var(--ih-sub);
+}
+.ch-kind.is-api { background: var(--ih-primary-soft); color: var(--ih-primary); }
+.ch-kind.is-agent { background: rgba(247, 144, 9, 0.14); color: #f79009; }
+.ch-tag {
+  font-size: 10px; padding: 1px 7px; border-radius: 999px;
+  background: rgba(18, 183, 106, 0.12); color: #12b76a;
+}
+.ch-actions { display: flex; gap: 6px; flex: 0 0 auto; }
+.ch-meta {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin-top: 6px; font-size: 11.5px; color: var(--ih-sub);
+}
+.ch-meta code { font-size: 11.5px; color: var(--ih-ink); word-break: break-all; }
+.ch-model { color: var(--ih-ink); }
+.ch-key { color: #f04438; }
+.ch-key.is-ok { color: #12b76a; }
+.ch-empty { padding: 16px 12px; }
+.ch-globals { margin-top: 14px; }
+
+/* ===== 从 Magpie 导入 ===== */
+.magpie-error {
+  padding: 16px; border-radius: 12px;
+  border: 1px solid rgba(240, 68, 56, 0.3); background: rgba(240, 68, 56, 0.06);
+}
+.magpie-error b { font-size: 13.5px; color: #f04438; }
+.magpie-error p { margin: 6px 0 12px; font-size: 12.5px; color: var(--ih-sub); line-height: 1.6; }
+.magpie-head { margin-bottom: 14px; }
+.magpie-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12px; }
+.magpie-meta code { font-size: 11.5px; color: var(--ih-ink); }
+.magpie-ok {
+  font-size: 11px; padding: 1px 8px; border-radius: 999px;
+  background: rgba(18, 183, 106, 0.12); color: #12b76a; font-weight: 600;
+}
+.magpie-toolbar {
+  display: flex; align-items: center; gap: 12px;
+  padding: 8px 0; margin-bottom: 8px; border-bottom: 1px solid var(--ih-line);
+  font-size: 12.5px;
+}
+.magpie-list { display: flex; flex-direction: column; gap: 6px; }
+.magpie-item {
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 12px; border-radius: 12px; cursor: pointer;
+  border: 1px solid var(--ih-line); background: var(--ih-surface);
+}
+.magpie-item:hover { border-color: var(--ih-primary); }
+.magpie-item-main { flex: 1 1 auto; min-width: 0; }
+.magpie-item-name { font-size: 13px; font-weight: 600; color: var(--ih-ink); }
+.magpie-item-id {
+  font-size: 11px; color: var(--ih-sub); margin-top: 2px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.magpie-badges { display: flex; gap: 5px; flex: 0 0 auto; }
+.mbadge {
+  font-size: 10px; padding: 1px 7px; border-radius: 999px;
+  background: var(--ih-chip); color: var(--ih-sub); white-space: nowrap;
+}
+.mbadge--ok { background: var(--ih-primary-soft); color: var(--ih-primary); }
+.mbadge--ghost { background: transparent; border: 1px solid var(--ih-line); }
+
 .settings { display: flex; flex-direction: column; gap: 14px; }
 .page-head { display: flex; justify-content: space-between; align-items: flex-end; gap: 12px; }
 .page-title { margin: 0; font-size: 24px; font-weight: 700; }

@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from .. import channels as ch
+from .. import magpie as mg
 from .auth import require_user
 
 router = APIRouter(prefix="/api/channels", tags=["channel"])
@@ -34,6 +35,10 @@ class ChannelUpdate(BaseModel):
     temperature: Optional[float] = None
     max_rounds: Optional[int] = None
     enabled: Optional[bool] = None
+
+
+class MagpieImportReq(BaseModel):
+    models: list[str] = []
 
 
 class ModelsReq(BaseModel):
@@ -115,3 +120,26 @@ def test(channel_id: int, timeout: Optional[int] = None,
         return ch.test_channel(channel_id, timeout)
     except ch.AIError as ex:
         raise HTTPException(502, str(ex))
+
+
+# ---------------- 从本机 Magpie 导入 ----------------
+
+@router.get("/magpie/detect")
+def magpie_detect(user: dict = Depends(require_user)):
+    """探测本机 Magpie 网关。
+
+    只读本地配置文件 + 探一次 /v1/models，不写入任何东西。
+    探测失败不抛异常 —— 前端要拿 error 字段显示「请先启动 Magpie」这类提示。
+    """
+    return mg.detect()
+
+
+@router.post("/magpie/import")
+def magpie_import(payload: MagpieImportReq, user: dict = Depends(require_user)):
+    """把选中的 Magpie 模型导入成本平台的通道。"""
+    owner_id = user.get("id") or None
+    try:
+        result = mg.import_models(payload.models, owner_id)
+    except mg.MagpieError as ex:
+        raise HTTPException(400, str(ex))
+    return {"ok": True, **result}
