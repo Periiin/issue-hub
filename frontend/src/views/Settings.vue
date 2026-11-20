@@ -302,6 +302,96 @@
       </div>
     </section>
 
+    <!-- 用户管理（仅管理员可见） -->
+    <section v-if="me?.role === 'admin'" class="panel ih-card">
+      <div class="panel-head">
+        <div class="panel-title">
+          <span class="step-badge step-badge--gray">👥</span>
+          <div>
+            <h2>用户管理</h2>
+            <p>每人只能看到自己的问题、项目和通道；管理员可以管所有人和所有通道</p>
+          </div>
+        </div>
+        <div class="panel-actions">
+          <el-button round :loading="usersLoading" @click="loadUsers">刷新</el-button>
+          <el-button type="primary" round @click="openCreateUser">＋ 新建用户</el-button>
+        </div>
+      </div>
+
+      <div class="user-list">
+        <div v-for="u in users" :key="u.id" class="user-row">
+          <div class="user-main">
+            <div class="user-name">
+              {{ u.display_name || u.username }}
+              <span class="user-role" :class="`is-${u.role}`">{{ u.role === 'admin' ? '管理员' : '普通' }}</span>
+              <span v-if="!u.enabled" class="user-tag">已停用</span>
+              <span v-if="me && u.id === me.id" class="user-tag is-me">当前登录</span>
+            </div>
+            <div class="user-account">
+              <code>{{ u.username }}</code>
+              <span v-if="u.created_at" class="ih-muted">创建于 {{ u.created_at }}</span>
+            </div>
+          </div>
+          <div class="user-actions">
+            <el-button size="small" round @click="openResetPassword(u)">改密码</el-button>
+            <el-button
+              size="small" round :disabled="me && u.id === me.id"
+              @click="doToggleUser(u)"
+            >{{ u.enabled ? '停用' : '启用' }}</el-button>
+            <el-button
+              size="small" round type="danger" plain :disabled="me && u.id === me.id"
+              @click="doDeleteUser(u)"
+            >删除</el-button>
+          </div>
+        </div>
+        <div v-if="!users.length" class="ih-muted user-empty">
+          还没有用户。
+        </div>
+      </div>
+
+      <p class="field-hint user-hint">
+        登录开关在「其他代码设置」里。开之前先确认已配好 IP 白名单，
+        否则换网络就登不进来了。
+      </p>
+    </section>
+
+
+    <!-- 用户编辑抽屉 -->
+    <el-drawer
+      v-model="userDrawer" :title="userForm.id ? '重置密码' : '新建用户'"
+      :size="isMobile ? '100%' : '460px'" append-to-body
+    >
+      <el-form label-position="top">
+        <template v-if="!userForm.id">
+          <el-form-item label="用户名">
+            <el-input v-model="userForm.username" placeholder="登录用，字母数字" />
+          </el-form-item>
+          <el-form-item label="显示名">
+            <el-input v-model="userForm.display_name" placeholder="可选，列表里显示的名字" />
+          </el-form-item>
+          <el-form-item label="角色">
+            <el-radio-group v-model="userForm.role">
+              <el-radio-button value="user">普通</el-radio-button>
+              <el-radio-button value="admin">管理员</el-radio-button>
+            </el-radio-group>
+            <div class="field-hint">
+              管理员能看所有人的问题、管理用户和通道；普通用户只看自己的
+            </div>
+          </el-form-item>
+        </template>
+        <el-form-item :label="userForm.id ? `给 ${userForm.username} 设置新密码` : '密码'">
+          <el-input
+            v-model="userForm.password" type="password" show-password
+            placeholder="至少 6 位" @keyup.enter="saveUser"
+          />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="userDrawer = false">取消</el-button>
+        <el-button type="primary" :loading="userSaving" @click="saveUser">保存</el-button>
+      </template>
+    </el-drawer>
+
     <!-- 通道编辑抽屉 -->
     <el-drawer v-model="chDrawer" :title="chForm.id ? '编辑通道' : '新建通道'" :size="isMobile ? '100%' : '620px'" append-to-body>
       <el-form label-position="top" class="ch-form">
@@ -383,10 +473,11 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
-  clearRate, createChannel, createProject, deleteChannel, deleteProject, getChannels,
-  getProjects, getRateStatus, getSettings, listChannelModels, mergeProjects, saveSettings,
-  scanRepos, testChannel, unlockRate, updateChannel, updateProject,
-  type Channel, type Project, type ScanResult
+  changePassword, clearRate, createChannel, createProject, createUser, deleteChannel,
+  deleteProject, deleteUser, getChannels, getMe, getProjects, getRateStatus, getSettings,
+  listChannelModels, listUsers, mergeProjects, saveSettings, scanRepos, testChannel,
+  toggleUser, unlockRate, updateChannel, updateProject,
+  type AppUser, type AuthUser, type Channel, type Project, type ScanResult
 } from '../api'
 import { useTheme } from '../useTheme'
 import { useMobile } from '../useMobile'
@@ -396,6 +487,90 @@ const isMobile = useMobile()
 const form = reactive<Record<string, any>>({})
 const rubricVersion = ref('')
 const saving = ref(false)
+
+/* ===== 用户管理 ===== */
+const me = ref<AuthUser | null>(null)
+const users = ref<AppUser[]>([])
+const usersLoading = ref(false)
+const userDrawer = ref(false)
+const userSaving = ref(false)
+const userForm = reactive<Record<string, any>>({
+  id: 0, username: '', display_name: '', role: 'user', password: ''
+})
+
+const loadUsers = async () => {
+  usersLoading.value = true
+  try {
+    const r = await listUsers()
+    users.value = r.users || []
+  } catch {
+    users.value = []
+  } finally {
+    usersLoading.value = false
+  }
+}
+
+const resetUserForm = () => {
+  Object.assign(userForm, { id: 0, username: '', display_name: '', role: 'user', password: '' })
+}
+
+const openCreateUser = () => {
+  resetUserForm()
+  userDrawer.value = true
+}
+
+const openResetPassword = (u: AppUser) => {
+  resetUserForm()
+  Object.assign(userForm, { id: u.id, username: u.username })
+  userDrawer.value = true
+}
+
+const saveUser = async () => {
+  if (!userForm.password || userForm.password.length < 6) {
+    ElMessage.warning('密码至少 6 位')
+    return
+  }
+  userSaving.value = true
+  try {
+    if (userForm.id) {
+      await changePassword(userForm.id, userForm.password)
+      ElMessage.success('密码已重置')
+    } else {
+      if (!userForm.username.trim()) {
+        ElMessage.warning('请填用户名')
+        return
+      }
+      await createUser({
+        username: userForm.username.trim(),
+        password: userForm.password,
+        display_name: userForm.display_name || userForm.username.trim(),
+        role: userForm.role
+      })
+      ElMessage.success('用户已创建')
+    }
+    userDrawer.value = false
+    await loadUsers()
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.detail || '保存失败')
+  } finally {
+    userSaving.value = false
+  }
+}
+
+const doToggleUser = async (u: AppUser) => {
+  await toggleUser(u.id, !u.enabled)
+  await loadUsers()
+  ElMessage.success(u.enabled ? '已停用' : '已启用')
+}
+
+const doDeleteUser = async (u: AppUser) => {
+  await ElMessageBox.confirm(
+    `删除用户「${u.display_name || u.username}」？他的问题会变成「无归属」，不会删除。`,
+    '提示', { type: 'warning' })
+  await deleteUser(u.id)
+  await loadUsers()
+  ElMessage.success('已删除')
+}
 
 /* ===== 安全与限流 ===== */
 const rate = ref<any>(null)
@@ -714,6 +889,10 @@ onMounted(async () => {
   await loadProjects()
   await loadChannels()
   await loadRate()
+  // 当前用户：决定「用户」区块是否显示
+  const m = await getMe().catch(() => null)
+  me.value = m?.user || null
+  if (me.value?.role === 'admin') await loadUsers()
 })
 </script>
 
@@ -724,8 +903,11 @@ onMounted(async () => {
 .page-sub { margin: 4px 0 0; font-size: 13px; color: var(--ih-sub); }
 
 .panel { padding: 18px 20px; }
-.panel-head { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 14px; }
-.panel-title { display: flex; gap: 12px; align-items: flex-start; }
+.panel-head {
+  display: flex; justify-content: space-between; align-items: flex-start;
+  gap: 12px; flex-wrap: wrap; margin-bottom: 14px;
+}
+.panel-title { display: flex; gap: 12px; align-items: flex-start; flex: 1 1 260px; min-width: 0; }
 .panel-title h2 { margin: 0; font-size: 16px; font-weight: 700; }
 .panel-title p { margin: 3px 0 0; font-size: 12px; color: var(--ih-sub); }
 .step-badge {
@@ -865,12 +1047,54 @@ onMounted(async () => {
 
 .footer { display: flex; justify-content: space-between; align-items: center; padding: 4px 2px 10px; }
 
+/* ===== 用户管理 ===== */
+.user-list { display: flex; flex-direction: column; gap: 8px; }
+.user-row {
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 12px; border-radius: 12px;
+  border: 1px solid var(--ih-line); background: var(--ih-surface);
+}
+.user-main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.user-name {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  font-size: 13.5px; font-weight: 600; color: var(--ih-ink);
+}
+.user-role {
+  font-size: 10.5px; font-weight: 500; padding: 1px 7px; border-radius: 999px;
+  background: var(--ih-chip); color: var(--ih-sub);
+}
+.user-role.is-admin { background: rgba(79, 70, 229, 0.12); color: var(--ih-primary); }
+.user-tag {
+  font-size: 10.5px; padding: 1px 7px; border-radius: 999px;
+  background: rgba(240, 68, 56, 0.1); color: #f04438;
+}
+.user-tag.is-me { background: rgba(18, 183, 106, 0.12); color: #12b76a; }
+.user-account {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  font-size: 11.5px; color: var(--ih-sub);
+}
+.user-account code { font-size: 11.5px; color: var(--ih-ink); }
+.user-actions { display: flex; gap: 6px; flex-shrink: 0; }
+.user-empty { padding: 16px 12px; }
+.user-hint { margin-top: 10px; }
+
+@media (max-width: 768px) {
+  /* 手机上按钮换行到下一行，避免挤压用户名 */
+  .user-row { flex-direction: column; align-items: stretch; gap: 8px; }
+  .user-actions { justify-content: flex-end; }
+}
+
 @media (max-width: 768px) {
   .page-head .el-button { display: none; }
   .panel { padding: 14px; }
   .field-grid { grid-template-columns: 1fr; }
   .field--wide { grid-column: span 1; }
   .footer { position: sticky; bottom: calc(64px + env(safe-area-inset-bottom)); }
+
+  /* 区块头部：窄屏下标题与按钮各占一行，别挤成一团 */
+  .panel-head { flex-wrap: wrap; }
+  .panel-title { flex: 1 1 100%; }
+  .panel-actions { width: 100%; justify-content: flex-end; }
 
   /* 项目行：手机上横向放不下「名称+标签+两按钮」，改成两行 */
   .proj-toolbar { gap: 8px; }

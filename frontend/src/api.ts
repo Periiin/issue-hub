@@ -36,6 +36,13 @@ export interface AuthUser {
   role: 'admin' | 'user'
 }
 
+/** 用户列表里的完整记录（后端返回 snake_case + enabled/created_at） */
+export interface AppUser extends AuthUser {
+  display_name?: string
+  enabled: boolean
+  created_at?: string
+}
+
 export const getAuthMode = () =>
   api.get<{ enabled: boolean }>('/auth/mode').then((r) => r.data)
 

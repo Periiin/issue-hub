@@ -33,6 +33,23 @@
             </svg>
           </button>
           <el-button v-if="!isMobile" type="primary" round @click="goCreate">＋ 新建问题</el-button>
+
+          <!-- 用户菜单：鉴权关闭时不显示 -->
+          <el-dropdown v-if="user" trigger="click" @command="onUserCommand">
+            <button class="user-btn">
+              <span class="user-avatar">{{ avatarText }}</span>
+              <span v-if="!isMobile" class="user-name">{{ user.displayName || user.username }}</span>
+            </button>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item disabled>
+                  {{ user.username }}<span v-if="user.role === 'admin'"> · 管理员</span>
+                </el-dropdown-item>
+                <el-dropdown-item command="password" divided>修改密码</el-dropdown-item>
+                <el-dropdown-item command="logout">退出登录</el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
         </div>
       </div>
     </header>
@@ -56,17 +73,113 @@
         <span class="tab-text">设置</span>
       </router-link>
     </nav>
+
+    <!-- 修改自己的密码 -->
+    <el-drawer v-model="pwdDrawer" title="修改密码" :size="isMobile ? '100%' : '400px'" append-to-body>
+      <el-form label-position="top">
+        <el-form-item label="新密码">
+          <el-input v-model="pwdNew" type="password" show-password placeholder="至少 6 位" />
+        </el-form-item>
+        <el-form-item label="再输一次">
+          <el-input v-model="pwdAgain" type="password" show-password @keyup.enter="savePassword" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="pwdDrawer = false">取消</el-button>
+        <el-button type="primary" :loading="pwdSaving" @click="savePassword">保存</el-button>
+      </template>
+    </el-drawer>
   </div>
 </template>
 
 <script setup lang="ts">
-import { useRouter } from 'vue-router'
+import { computed, onMounted, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import { ElMessage } from 'element-plus'
+import { changePassword, clearToken, getMe, logout, type AuthUser } from './api'
 import { useMobile } from './useMobile'
 import { useTheme } from './useTheme'
 
 const router = useRouter()
+const route = useRoute()
 const isMobile = useMobile()
 const { isDark, toggle: toggleTheme } = useTheme()
+
+/* ---------- 当前用户 ---------- */
+const user = ref<AuthUser | null>(null)
+const avatarText = computed(() => {
+  const n = user.value?.displayName || user.value?.username || ''
+  return n ? n.slice(0, 1).toUpperCase() : '?'
+})
+
+const loadMe = async () => {
+  // 鉴权关闭时后端返回虚拟 admin（id=0），一样展示菜单（改密码会被后端拒绝）
+  try {
+    const r = await getMe()
+    user.value = r.user || null
+  } catch {
+    user.value = null
+  }
+}
+
+const onUserCommand = async (cmd: string) => {
+  if (cmd === 'password') {
+    pwdNew.value = ''
+    pwdAgain.value = ''
+    pwdDrawer.value = true
+    return
+  }
+  if (cmd === 'logout') {
+    try {
+      await logout()
+    } catch {
+      /* 网络挂了也要能退出 */
+    }
+    clearToken()
+    user.value = null
+    ElMessage.success('已退出登录')
+    router.replace('/login')
+  }
+}
+
+/* ---------- 改密码 ---------- */
+const pwdDrawer = ref(false)
+const pwdNew = ref('')
+const pwdAgain = ref('')
+const pwdSaving = ref(false)
+
+const savePassword = async () => {
+  if (!pwdNew.value || pwdNew.value.length < 6) {
+    ElMessage.warning('密码至少 6 位')
+    return
+  }
+  if (pwdNew.value !== pwdAgain.value) {
+    ElMessage.warning('两次输入不一致')
+    return
+  }
+  if (!user.value?.id) {
+    ElMessage.warning('当前是本机免登录模式，没有可改的密码')
+    return
+  }
+  pwdSaving.value = true
+  try {
+    await changePassword(user.value.id, pwdNew.value)
+    ElMessage.success('密码已修改')
+    pwdDrawer.value = false
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.detail || '修改失败')
+  } finally {
+    pwdSaving.value = false
+  }
+}
+
+onMounted(loadMe)
+
+// 登录页是 bare 布局，App.vue 那时已挂载但还没有 token；
+// 登录成功跳走时组件不会重新挂载，所以跟着路由再拉一次。
+watch(() => route.fullPath, () => {
+  if (!user.value) loadMe()
+})
 
 /** 新建入口统一走列表页的弹窗（?new=1 由列表页消费） */
 const goCreate = () => router.push({ path: '/issues', query: { new: '1' } })
@@ -120,6 +233,22 @@ const goCreate = () => router.push({ path: '/issues', query: { new: '1' } })
 }
 .theme-btn:hover { color: var(--ih-primary); border-color: var(--ih-primary); transform: rotate(8deg); }
 .theme-btn:active { transform: scale(0.94); }
+
+/* 用户菜单按钮 */
+.user-btn {
+  display: inline-flex; align-items: center; gap: 7px;
+  height: 36px; padding: 0 10px 0 4px; border-radius: 999px;
+  border: 1px solid var(--ih-line); background: var(--ih-card);
+  color: var(--ih-ink); cursor: pointer; transition: all 0.16s ease;
+}
+.user-btn:hover { border-color: var(--ih-primary); }
+.user-avatar {
+  width: 28px; height: 28px; border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 13px; font-weight: 600; color: #fff;
+  background: linear-gradient(135deg, var(--ih-primary), var(--ih-primary-2));
+}
+.user-name { font-size: 13px; max-width: 110px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .content { max-width: 1400px; margin: 0 auto; padding: 20px; }
 /* 列表页内容比详情页窄，单独收一下，避免表格被拉得过长 */
