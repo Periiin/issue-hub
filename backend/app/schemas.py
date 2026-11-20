@@ -31,6 +31,43 @@ class IssuePatch(BaseModel):
     project_id: Optional[int] = None
     # 兼容旧字段：单个仓库，写入时会合并进 target_repos
     target_repo: Optional[str] = None
+    # 负责人（app_user.username）；空串表示取消分配
+    assignee: Optional[str] = None
+    # 承诺给甲方的截止日期 YYYY-MM-DD；空串表示清空
+    due_date: Optional[str] = None
+    # 标签（整组覆盖）
+    tags: Optional[list[str]] = None
+
+
+class LinkCreate(BaseModel):
+    other_id: int
+    kind: str = "duplicate"
+
+
+class CommentCreate(BaseModel):
+    body: str = ""
+
+
+class IssueBatchIds(BaseModel):
+    ids: list[int]
+
+
+class IssueBatchPatch(BaseModel):
+    """批量改：只允许改「一排人一起改」有意义的字段。
+
+    标题/描述/复现步骤这类逐条不同的内容不放进批量，
+    否则一次误操作能把 50 条问题改成同一个标题。
+    """
+    ids: list[int]
+    status: Optional[str] = None
+    priority: Optional[str] = None
+    severity: Optional[str] = None
+    complexity: Optional[str] = None
+    assignee: Optional[str] = None
+    due_date: Optional[str] = None
+    module: Optional[str] = None
+    # 标签是「加」不是「覆盖」：批量打标签的语义是追加
+    add_tags: Optional[list[str]] = None
 
 
 class AIRequest(BaseModel):

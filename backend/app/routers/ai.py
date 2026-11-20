@@ -91,7 +91,8 @@ def qualify(issue_id: int, payload: AIRequest, user: dict = Depends(require_user
         _record_run(conn, issue_id, "qualify", result, True)
         conn.execute("UPDATE issue SET qualify_draft = ?, prompt_version = ?, updated_at = ? WHERE id = ?",
                      (json.dumps(data, ensure_ascii=False), RUBRIC_VERSION, now(), issue_id))
-        add_event(conn, issue_id, "qualify", note=f"AI 定性（{result.provider}）")
+        add_event(conn, issue_id, "qualify", note=f"AI 定性（{result.provider}）",
+                  actor=user.get("displayName") or user.get("username"))
     return {"draft": data, "provider": result.provider, "model": result.model,
             "durationMs": result.duration_ms, "rounds": result.rounds,
             "toolCalls": result.tool_calls}
@@ -116,7 +117,7 @@ def confirm_qualify(issue_id: int, payload: QualifyConfirm,
              "待定级", now(), issue_id),
         )
         add_event(conn, issue_id, "confirm", from_status=issue["status"], to_status="待定级",
-                  note="人工确认定性结果")
+                  note="人工确认定性结果", actor=user.get("displayName") or user.get("username"))
     return {"ok": True, "status": "待定级"}
 
 
@@ -155,7 +156,7 @@ def triage(issue_id: int, payload: AIRequest, user: dict = Depends(require_user)
              "待处理", now(), issue_id),
         )
         add_event(conn, issue_id, "triage", from_status=issue["status"], to_status="待处理",
-                  note=f"AI 定级：{priority} / {severity} / {complexity}")
+                  note=f"AI 定级：{priority} / {severity} / {complexity}", actor=user.get("displayName") or user.get("username"))
     return {"triage": data, "provider": result.provider, "durationMs": result.duration_ms}
 
 
@@ -194,5 +195,5 @@ def make_fix_plan(issue_id: int, payload: FixRequest,
         conn.execute("UPDATE issue SET fix_plan = ?, status = ?, updated_at = ? WHERE id = ?",
                      (json.dumps(data, ensure_ascii=False), "处理中", now(), issue_id))
         add_event(conn, issue_id, "fix", from_status=issue["status"], to_status="处理中",
-                  note=f"AI 生成修复方案（{result.provider}）")
+                  note=f"AI 生成修复方案（{result.provider}）", actor=user.get("displayName") or user.get("username"))
     return {"plan": data, "provider": result.provider, "durationMs": result.duration_ms}

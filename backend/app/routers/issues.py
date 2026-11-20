@@ -1,16 +1,19 @@
 """问题 CRUD、附件、导出。"""
+import datetime
 import json
 import shutil
+import sqlite3
 import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import PlainTextResponse
 
-from ..config import ALL_STATUS, ATTACH_DIR, MAX_UPLOAD_BYTES
+from ..config import ALL_STATUS, ATTACH_DIR, MAX_UPLOAD_BYTES, STATUS_FINAL
 from ..db import add_event, connect, dict_row, list_rows, now, valid_status
 from .auth import require_user
-from ..schemas import IssueCreate, IssuePatch
+from ..schemas import (CommentCreate, IssueBatchIds, IssueBatchPatch,
+                       IssueCreate, IssuePatch, LinkCreate)
 
 router = APIRouter(prefix="/api/issues", tags=["issues"])
 
@@ -55,7 +58,9 @@ def _json_or_none(raw: str | None):
 
 @router.get("")
 def list_issues(status: str = "", priority: str = "", module: str = "",
-                q: str = "", limit: int = Query(50, ge=1, le=200),
+                q: str = "", tag: str = "", assignee: str = "",
+                due: str = "", mine: str = "",
+                limit: int = Query(50, ge=1, le=200),
                 offset: int = Query(0, ge=0),
                 user: dict = Depends(require_user)):
     """问题列表（分页）。
@@ -77,13 +82,41 @@ def list_issues(status: str = "", priority: str = "", module: str = "",
     if module:
         where.append("module LIKE ?")
         args.append(f"%{module}%")
+    if tag:
+        # tags 是 JSON 数组文本，用带引号的匹配避免 "支付" 命中 "支付宝"
+        where.append("tags LIKE ?")
+        args.append(f'%"{tag}"%')
+    if assignee:
+        where.append("assignee = ?")
+        args.append(assignee)
+    if due:
+        # due=overdue 只看逾期且未关闭；due=week 看 7 天内到期
+        marks = ",".join("?" * len(STATUS_FINAL))
+        if due == "overdue":
+            where.append(f"due_date IS NOT NULL AND due_date != '' AND due_date < ? "
+                         f"AND status NOT IN ({marks})")
+            args.append(datetime.date.today().isoformat())
+            args += list(STATUS_FINAL)
+        elif due == "week":
+            today = datetime.date.today()
+            where.append("due_date >= ? AND due_date <= ?")
+            args += [today.isoformat(), (today + datetime.timedelta(days=7)).isoformat()]
+    if mine:
+        # mine=assigned 分配给我的；mine=reported 我提的
+        me_name = user.get("username") or ""
+        if mine == "assigned":
+            where.append("assignee = ?")
+            args.append(me_name)
+        elif mine == "reported":
+            where.append("reporter = ?")
+            args.append(me_name)
     if q:
         # 搜索范围要覆盖「确认后的描述」——AI 整理过的现象往往比甲方原话准确，
         # 只搜 raw_text 会漏掉最该命中的那条
         like = f"%{q}%"
         where.append("(title LIKE ? OR raw_text LIKE ? OR module LIKE ? OR reporter LIKE ? "
-                     "OR qualify_final LIKE ?)")
-        args += [like] * 5
+                     "OR qualify_final LIKE ? OR tags LIKE ?)")
+        args += [like] * 6
 
     clause = (" WHERE " + " AND ".join(where)) if where else ""
     order = (" ORDER BY CASE priority WHEN 'P0' THEN 0 WHEN 'P1' THEN 1 WHEN 'P2' THEN 2 "
@@ -101,7 +134,24 @@ def list_issues(status: str = "", priority: str = "", module: str = "",
         count_sql += " GROUP BY status"
         counts = {r["status"]: r["n"] for r in conn.execute(count_sql, owner_args).fetchall()}
     return {"list": rows, "counts": counts, "statuses": ALL_STATUS,
-            "total": total, "limit": limit, "offset": offset}
+            "total": total, "limit": limit, "offset": offset,
+            "tags": _all_tags(conn, owner_sql, owner_args)}
+
+
+def _all_tags(conn, owner_sql: str, owner_args: list) -> list[str]:
+    """汇总所有用过的标签（给前端筛选下拉）。空标签不算。"""
+    sql = "SELECT tags FROM issue WHERE tags IS NOT NULL AND tags != ''"
+    if owner_sql:
+        sql += f" AND {owner_sql}"
+    seen: list[str] = []
+    for row in conn.execute(sql, owner_args).fetchall():
+        try:
+            for t in json.loads(row["tags"] or "[]"):
+                if t and t not in seen:
+                    seen.append(t)
+        except (json.JSONDecodeError, TypeError):
+            continue
+    return seen
 
 
 @router.post("")
@@ -116,7 +166,8 @@ def create_issue(payload: IssueCreate, user: dict = Depends(require_user)):
              user.get("id") or None, ts, ts),
         )
         issue_id = cur.lastrowid
-        add_event(conn, issue_id, "create", to_status="待定性", note="新建问题")
+        add_event(conn, issue_id, "create", to_status="待定性", note="新建问题",
+                  actor=user.get("displayName") or user.get("username"))
     return {"id": issue_id}
 
 
@@ -181,6 +232,8 @@ def patch_issue(issue_id: int, payload: IssuePatch, user: dict = Depends(require
     # project_id=0 表示取消归属（前端 clearable 传 0）
     if "project_id" in data:
         data["project_id"] = data["project_id"] or None
+    if "tags" in data:
+        data["tags"] = json.dumps(data["tags"] or [], ensure_ascii=False)
     if "target_repo" in data and data["target_repo"]:
         from ..fix import is_repo_root
         if not is_repo_root(data["target_repo"]):
@@ -197,7 +250,8 @@ def patch_issue(issue_id: int, payload: IssuePatch, user: dict = Depends(require
         issue = _load_issue(conn, issue_id, user)
         conn.execute(f"UPDATE issue SET {sets} WHERE id = ?", [*data.values(), issue_id])
         if data.get("status") and data["status"] != issue["status"]:
-            add_event(conn, issue_id, "status", from_status=issue["status"], to_status=data["status"])
+            add_event(conn, issue_id, "status", from_status=issue["status"],
+                      to_status=data["status"], actor=user.get("displayName") or user.get("username"))
     return {"ok": True}
 
 
@@ -211,6 +265,220 @@ def delete_issue(issue_id: int, user: dict = Depends(require_user)):
         conn.execute("DELETE FROM event WHERE issue_id = ?", (issue_id,))
     shutil.rmtree(ATTACH_DIR / str(issue["id"]), ignore_errors=True)
     return {"ok": True}
+
+
+# ---------------- 关联（重复/相关） ----------------
+
+LINK_KINDS = {"duplicate": "重复", "related": "相关", "blocks": "阻塞"}
+
+
+@router.get("/{issue_id}/links")
+def list_links(issue_id: int, user: dict = Depends(require_user)):
+    """本问题的关联。双向查：别人把我标成重复，我这边也要看到。"""
+    with connect() as conn:
+        _load_issue(conn, issue_id, user)
+        rows = list_rows(conn.execute(
+            "SELECT l.id, l.kind, l.created_at, "
+            "       CASE WHEN l.issue_id = ? THEN l.other_id ELSE l.issue_id END AS target_id, "
+            "       CASE WHEN l.issue_id = ? THEN 'out' ELSE 'in' END AS direction, "
+            "       i.title, i.status "
+            "FROM issue_link l JOIN issue i "
+            "  ON i.id = CASE WHEN l.issue_id = ? THEN l.other_id ELSE l.issue_id END "
+            "WHERE l.issue_id = ? OR l.other_id = ? ORDER BY l.id DESC",
+            (issue_id, issue_id, issue_id, issue_id, issue_id)).fetchall())
+    for r in rows:
+        r["kindLabel"] = LINK_KINDS.get(r["kind"], r["kind"])
+    return {"links": rows}
+
+
+@router.post("/{issue_id}/links")
+def add_link(issue_id: int, payload: LinkCreate, user: dict = Depends(require_user)):
+    other = int(payload.other_id or 0)
+    if other == issue_id:
+        raise HTTPException(400, "不能关联自己")
+    kind = payload.kind or "duplicate"
+    if kind not in LINK_KINDS:
+        raise HTTPException(400, f"不支持的关联类型：{kind}")
+
+    with connect() as conn:
+        _load_issue(conn, issue_id, user)
+        # 目标也必须有权访问，否则等于靠关联接口探别人有没有这个 id
+        _load_issue(conn, other, user)
+        try:
+            conn.execute(
+                "INSERT INTO issue_link(issue_id, other_id, kind, created_at) VALUES (?, ?, ?, ?)",
+                (issue_id, other, kind, now()))
+        except sqlite3.IntegrityError:
+            raise HTTPException(400, "已经关联过了")
+        add_event(conn, issue_id, "link", note=f"{LINK_KINDS[kind]} #{other}",
+                  actor=user.get("displayName") or user.get("username"))
+    return {"ok": True}
+
+
+@router.delete("/{issue_id}/links/{link_id}")
+def remove_link(issue_id: int, link_id: int, user: dict = Depends(require_user)):
+    with connect() as conn:
+        _load_issue(conn, issue_id, user)
+        conn.execute("DELETE FROM issue_link WHERE id = ? AND (issue_id = ? OR other_id = ?)",
+                     (link_id, issue_id, issue_id))
+    return {"ok": True}
+
+
+# ---------------- 讨论区 ----------------
+
+@router.get("/{issue_id}/comments")
+def list_comments(issue_id: int, user: dict = Depends(require_user)):
+    with connect() as conn:
+        _load_issue(conn, issue_id, user)
+        rows = list_rows(conn.execute(
+            "SELECT id, author, author_id, body, created_at FROM comment "
+            "WHERE issue_id = ? ORDER BY id", (issue_id,)).fetchall())
+    return {"comments": rows}
+
+
+@router.post("/{issue_id}/comments")
+def add_comment(issue_id: int, payload: CommentCreate,
+                user: dict = Depends(require_user)):
+    body = (payload.body or "").strip()
+    if not body:
+        raise HTTPException(400, "内容不能为空")
+    if len(body) > 5000:
+        raise HTTPException(400, "单条评论最多 5000 字")
+    author = user.get("displayName") or user.get("username") or "我"
+    with connect() as conn:
+        _load_issue(conn, issue_id, user)
+        cur = conn.execute(
+            "INSERT INTO comment(issue_id, author, author_id, body, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (issue_id, author, user.get("id") or None, body, now()))
+        # 时间线里也记一条，翻记录时不用两个地方对着看
+        add_event(conn, issue_id, "note", note=f"评论：{body[:60]}", actor=author)
+        row = dict(conn.execute("SELECT id, author, author_id, body, created_at "
+                                "FROM comment WHERE id = ?",
+                                (cur.lastrowid,)).fetchone())
+    return {"comment": row}
+
+
+@router.delete("/{issue_id}/comments/{comment_id}")
+def delete_comment(issue_id: int, comment_id: int,
+                   user: dict = Depends(require_user)):
+    """删评论：作者本人或管理员。"""
+    with connect() as conn:
+        _load_issue(conn, issue_id, user)
+        row = conn.execute("SELECT * FROM comment WHERE id = ? AND issue_id = ?",
+                           (comment_id, issue_id)).fetchone()
+        if not row:
+            raise HTTPException(404, "评论不存在")
+        if user.get("role") != "admin" and row["author_id"] != user.get("id"):
+            raise HTTPException(403, "只能删除自己的评论")
+        conn.execute("DELETE FROM comment WHERE id = ?", (comment_id,))
+    return {"ok": True}
+
+
+# ---------------- 批量 ----------------
+
+@router.post("/batch")
+def batch_patch(payload: IssueBatchPatch, user: dict = Depends(require_user)):
+    """批量改状态/优先级/负责人/截止日期/模块/标签。
+
+    只处理调用者有权访问的 id，其余的静默跳过（返回 skipped 数量）——
+    返回 403 等于告诉对方「这些 id 存在」。
+    """
+    ids = [int(i) for i in (payload.ids or [])]
+    if not ids:
+        raise HTTPException(400, "请先选择问题")
+    if len(ids) > 500:
+        raise HTTPException(400, "一次最多处理 500 条")
+
+    data: dict[str, object] = {}
+    if payload.status is not None:
+        if not valid_status(payload.status):
+            raise HTTPException(400, f"非法状态：{payload.status}")
+        data["status"] = payload.status
+    for field in ("priority", "severity", "complexity", "assignee", "due_date", "module"):
+        value = getattr(payload, field)
+        if value is not None:
+            data[field] = value
+    if not data and payload.add_tags is None:
+        raise HTTPException(400, "没有要修改的字段")
+
+    marks = ",".join("?" * len(ids))
+    owner_sql, owner_args = _owner_filter(user)
+
+    with connect() as conn:
+        # 先取出有权的 id 和它们当前的状态（用于写事件）
+        sql = f"SELECT id, status, tags FROM issue WHERE id IN ({marks})"
+        args: list = list(ids)
+        if owner_sql:
+            sql += f" AND {owner_sql}"
+            args += owner_args
+        rows = {r["id"]: dict(r) for r in conn.execute(sql, args).fetchall()}
+
+        if not rows:
+            return {"ok": True, "updated": 0, "skipped": len(ids)}
+
+        sets = dict(data)
+        sets["updated_at"] = now()
+
+        if payload.add_tags is not None:
+            # 标签按「并集」追加，不覆盖原有标签
+            extra = [t for t in payload.add_tags if t]
+            for iid, row in rows.items():
+                try:
+                    current = json.loads(row.get("tags") or "[]")
+                except json.JSONDecodeError:
+                    current = []
+                merged = list(dict.fromkeys([*current, *extra]))
+                conn.execute("UPDATE issue SET tags = ? WHERE id = ?",
+                             (json.dumps(merged, ensure_ascii=False), iid))
+
+        if sets:
+            col_sql = ", ".join(f"{k} = ?" for k in sets)
+            conn.executemany(
+                f"UPDATE issue SET {col_sql} WHERE id = ?",
+                [[*sets.values(), iid] for iid in rows])
+
+        # 逐条写事件，时间线才看得出「谁在什么时候批量改的」
+        for iid, row in rows.items():
+            if data.get("status") and data["status"] != row["status"]:
+                add_event(conn, iid, "status", from_status=row["status"],
+                          to_status=str(data["status"]), note="批量修改",
+                          actor=user.get("displayName") or user.get("username"))
+
+    return {"ok": True, "updated": len(rows), "skipped": len(ids) - len(rows)}
+
+
+@router.post("/batch/delete")
+def batch_delete(payload: IssueBatchIds, user: dict = Depends(require_user)):
+    """批量删除。只删有权的，其余跳过。"""
+    ids = [int(i) for i in (payload.ids or [])]
+    if not ids:
+        raise HTTPException(400, "请先选择问题")
+    if len(ids) > 500:
+        raise HTTPException(400, "一次最多删除 500 条")
+
+    marks = ",".join("?" * len(ids))
+    owner_sql, owner_args = _owner_filter(user)
+    with connect() as conn:
+        sql = f"SELECT id FROM issue WHERE id IN ({marks})"
+        args: list = list(ids)
+        if owner_sql:
+            sql += f" AND {owner_sql}"
+            args += owner_args
+        allowed = [r["id"] for r in conn.execute(sql, args).fetchall()]
+        if not allowed:
+            return {"ok": True, "deleted": 0, "skipped": len(ids)}
+        m2 = ",".join("?" * len(allowed))
+        conn.execute(f"DELETE FROM issue WHERE id IN ({m2})", allowed)
+        conn.execute(f"DELETE FROM attachment WHERE issue_id IN ({m2})", allowed)
+        conn.execute(f"DELETE FROM ai_run WHERE issue_id IN ({m2})", allowed)
+        conn.execute(f"DELETE FROM event WHERE issue_id IN ({m2})", allowed)
+        conn.execute(f"DELETE FROM comment WHERE issue_id IN ({m2})", allowed)
+        conn.execute(f"DELETE FROM issue_link WHERE issue_id IN ({m2}) OR other_id IN ({m2})",
+                     [*allowed, *allowed])
+    for iid in allowed:
+        shutil.rmtree(ATTACH_DIR / str(iid), ignore_errors=True)
+    return {"ok": True, "deleted": len(allowed), "skipped": len(ids) - len(allowed)}
 
 
 # ---------------- 附件 ----------------

@@ -16,6 +16,40 @@
               <span v-if="issue.module">模块 {{ issue.module }}</span>
               <span>创建 {{ issue.created_at }}</span>
             </div>
+            <!-- 负责人 / 截止日期 / 标签：跟甲方承诺相关，放在显眼处 -->
+            <div class="meta-row">
+              <span class="meta-label">负责人</span>
+              <el-select
+                v-model="assignee" clearable placeholder="未分配" size="small"
+                class="meta-select" @change="saveField('assignee', assignee)"
+              >
+                <el-option
+                  v-for="u in assignees" :key="u.username"
+                  :label="u.displayName" :value="u.username"
+                />
+              </el-select>
+
+              <span class="meta-label">截止</span>
+              <el-date-picker
+                v-model="dueDate" type="date" size="small" placeholder="未设置"
+                value-format="YYYY-MM-DD" class="meta-date"
+                @change="saveField('due_date', dueDate || '')"
+              />
+              <span v-if="dueHint" class="due-hint" :class="dueHint.cls">{{ dueHint.text }}</span>
+
+              <span class="meta-label">标签</span>
+              <div class="tag-wrap">
+                <span v-for="t in tags" :key="t" class="tag-chip">
+                  {{ t }}
+                  <i class="tag-x" @click.stop="removeTag(t)">×</i>
+                </span>
+                <el-input
+                  v-model="tagInput" size="small" placeholder="+ 标签"
+                  class="tag-input" @keyup.enter="addTag" @blur="addTag"
+                />
+              </div>
+            </div>
+
             <!-- 所属项目：选定后代码范围与可改仓库都从这里带出 -->
             <div class="project-row">
               <span class="project-label">项目</span>
@@ -223,6 +257,91 @@
         </div>
       </section>
 
+      <!-- 关联：同一个 bug 甲方分几次提时连起来 -->
+      <section class="panel ih-card">
+        <div class="panel-head is-toggle" @click="toggleSection('links')">
+          <div class="panel-title">
+            <span class="step-badge step-badge--gray">链</span>
+            <div>
+              <h2>关联问题</h2>
+              <p v-if="!sections.links" class="fold-summary ih-muted">{{ links.length }} 条</p>
+            </div>
+          </div>
+          <span class="fold-arrow" :class="{ 'is-open': sections.links }" />
+        </div>
+        <div v-show="sections.links" class="fold-body" @click.stop>
+          <div v-if="!links.length" class="ih-muted comment-empty">
+            还没有关联。同一个问题甲方分几次提时，在这里把它们连起来。
+          </div>
+          <div v-for="l in links" :key="l.id" class="link-item">
+            <span class="link-kind">{{ l.kindLabel }}</span>
+            <span class="link-dir">{{ l.direction === 'out' ? '→' : '←' }}</span>
+            <a class="link-title" @click.stop="goIssue(l.target_id)">#{{ l.target_id }} {{ l.title }}</a>
+            <span class="link-status ih-muted">{{ l.status }}</span>
+            <el-button link type="danger" class="link-del" @click="removeLinkItem(l)">移除</el-button>
+          </div>
+
+          <div class="link-form">
+            <el-select
+              v-model="linkKind" size="small" class="link-kind-select"
+            >
+              <el-option label="重复" value="duplicate" />
+              <el-option label="相关" value="related" />
+              <el-option label="阻塞" value="blocks" />
+            </el-select>
+            <el-input
+              v-model="linkInput" size="small" placeholder="输入问题编号，如 12"
+              class="link-input" @keyup.enter="submitLink"
+            />
+            <el-button size="small" round :loading="linkSaving" @click="submitLink">关联</el-button>
+          </div>
+        </div>
+      </section>
+
+      <!-- 讨论区：甲方追问、内部讨论 -->
+      <section class="panel ih-card">
+        <div class="panel-head is-toggle" @click="toggleSection('comments')">
+          <div class="panel-title">
+            <span class="step-badge step-badge--blue">论</span>
+            <div>
+              <h2>讨论</h2>
+              <p v-if="!sections.comments" class="fold-summary ih-muted">{{ comments.length }} 条</p>
+            </div>
+          </div>
+          <span class="fold-arrow" :class="{ 'is-open': sections.comments }" />
+        </div>
+        <div v-show="sections.comments" class="fold-body" @click.stop>
+          <div v-if="!comments.length" class="ih-muted comment-empty">
+            还没有讨论。甲方追问、内部结论都可以写在这里。
+          </div>
+          <div v-for="c in comments" :key="c.id" class="comment-item">
+            <div class="comment-head">
+              <span class="comment-author">{{ c.author }}</span>
+              <span class="comment-time">{{ c.created_at }}</span>
+              <el-button
+                v-if="canDeleteComment(c)" link type="danger" class="comment-del"
+                @click="removeComment(c)"
+              >删除</el-button>
+            </div>
+            <div class="comment-body">{{ c.body }}</div>
+          </div>
+
+          <div class="comment-form">
+            <el-input
+              v-model="commentText" type="textarea" :rows="3" resize="none"
+              placeholder="写点什么… Ctrl+Enter 发送"
+              @keydown.ctrl.enter.prevent="submitComment"
+            />
+            <div class="comment-form-foot">
+              <span class="ih-muted">Ctrl + Enter 发送</span>
+              <el-button type="primary" round size="small" :loading="commentSaving" @click="submitComment">
+                发送
+              </el-button>
+            </div>
+          </div>
+        </div>
+      </section>
+
       <!-- 时间线 -->
       <section class="panel ih-card">
         <div class="panel-head is-toggle" @click="toggleSection('events')">
@@ -247,6 +366,7 @@
                   {{ e.from_status || '-' }} → {{ e.to_status || '-' }}
                 </span>
                 <span v-if="e.note" class="event-note">{{ e.note }}</span>
+                <span v-if="e.actor && e.actor !== 'me'" class="event-actor">@{{ e.actor }}</span>
               </div>
             </el-timeline-item>
           </el-timeline>
@@ -294,9 +414,10 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import FixWorkbench from './FixWorkbench.vue'
 import { useMobile } from '../useMobile'
 import {
-  confirmQualify, deleteAttachment, deleteIssue, fileUrl, getChannels, getIssue, getProjects,
-  getSettings, patchIssue, runQualify, runTriage, uploadAttachments,
-  type Channel, type Project
+  addComment, addLink, confirmQualify, deleteAttachment, deleteComment, deleteIssue, fileUrl,
+  getAssignees, getChannels, getIssue, getMe, getProjects, getSettings, listComments, listLinks,
+  patchIssue, removeLink, runQualify, runTriage, uploadAttachments,
+  type Assignee, type Channel, type IssueComment, type IssueLink, type Project
 } from '../api'
 
 const route = useRoute()
@@ -321,6 +442,89 @@ const confirming = ref(false)
 const triaging = ref(false)
 
 const workbenchOpen = ref(false)
+
+/* ===== 关联问题 ===== */
+const links = ref<IssueLink[]>([])
+const linkInput = ref('')
+const linkKind = ref('duplicate')
+const linkSaving = ref(false)
+
+const loadLinks = async () => {
+  try {
+    const r = await listLinks(id.value)
+    links.value = r.links || []
+  } catch {
+    links.value = []
+  }
+}
+
+const submitLink = async () => {
+  const other = Number(linkInput.value.trim())
+  if (!other) {
+    ElMessage.warning('请输入问题编号')
+    return
+  }
+  linkSaving.value = true
+  try {
+    await addLink(id.value, other, linkKind.value)
+    linkInput.value = ''
+    await loadLinks()
+    ElMessage.success('已关联')
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.detail || '关联失败')
+  } finally {
+    linkSaving.value = false
+  }
+}
+
+const removeLinkItem = async (l: IssueLink) => {
+  await removeLink(id.value, l.id)
+  links.value = links.value.filter((x) => x.id !== l.id)
+}
+
+const goIssue = (targetId: number) => router.push(`/issues/${targetId}`)
+
+/* ===== 讨论区 ===== */
+const comments = ref<IssueComment[]>([])
+const commentText = ref('')
+const commentSaving = ref(false)
+/** 当前用户，用于判断能否删别人的评论 */
+const meUser = ref<{ id?: number; role?: string } | null>(null)
+
+const loadComments = async () => {
+  try {
+    const r = await listComments(id.value)
+    comments.value = r.comments || []
+  } catch {
+    comments.value = []
+  }
+}
+
+const canDeleteComment = (c: IssueComment) =>
+  meUser.value?.role === 'admin' || (c.author_id && c.author_id === meUser.value?.id)
+
+const submitComment = async () => {
+  const body = commentText.value.trim()
+  if (!body) return
+  commentSaving.value = true
+  try {
+    const r = await addComment(id.value, body)
+    comments.value.push(r.comment)
+    commentText.value = ''
+    await refresh()   // 时间线也更新
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.detail || '发送失败')
+  } finally {
+    commentSaving.value = false
+  }
+}
+
+const removeComment = async (c: IssueComment) => {
+  await ElMessageBox.confirm('删除这条评论？', '提示', { type: 'warning' })
+  await deleteComment(id.value, c.id)
+  comments.value = comments.value.filter((x) => x.id !== c.id)
+  ElMessage.success('已删除')
+}
 
 /* ===== 所属项目 ===== */
 const projects = ref<Project[]>([])
@@ -361,9 +565,9 @@ const q = reactive({
 const triage = computed(() => issue.value?.triage || null)
 
 /* ===== 折叠：按状态给默认值，之后用户手动切换不被覆盖 ===== */
-type SectionKey = 'raw' | 'qualify' | 'triage' | 'events'
+type SectionKey = 'raw' | 'qualify' | 'triage' | 'links' | 'comments' | 'events'
 const sections = reactive<Record<SectionKey, boolean>>({
-  raw: true, qualify: true, triage: true, events: true
+  raw: true, qualify: true, triage: true, links: true, comments: true, events: true
 })
 let defaultedIssue = 0
 
@@ -376,12 +580,12 @@ const applySectionDefaults = () => {
   defaultedIssue = issue.value.id
   const st = issue.value.status || ''
   if (st === '待定性') {
-    Object.assign(sections, { raw: true, qualify: true, triage: false, events: false })
+    Object.assign(sections, { raw: true, qualify: true, triage: false, links: true, comments: true, events: false })
   } else if (st === '待定级') {
-    Object.assign(sections, { raw: true, qualify: false, triage: true, events: false })
+    Object.assign(sections, { raw: true, qualify: false, triage: true, links: true, comments: true, events: false })
   } else {
     // 待处理及之后：定性/定级收起，把空间留给时间线
-    Object.assign(sections, { raw: true, qualify: false, triage: false, events: true })
+    Object.assign(sections, { raw: true, qualify: false, triage: false, links: true, comments: true, events: true })
   }
 }
 
@@ -418,7 +622,7 @@ const dotClass = (s: string) => {
 const eventLabel = (t: string) =>
   ({ create: '新建', qualify: 'AI 定性', confirm: '人工确认', triage: 'AI 定级', fix: '生成方案',
      fix_apply: '开始修改', fix_accept: '采纳', fix_reject: '驳回',
-     status: '状态变更', note: '备注' } as any)[t] || t
+     status: '状态变更', note: '备注', link: '关联', comment: '评论' } as any)[t] || t
 const isImage = (a: any) => (a.mime || '').startsWith('image/')
 
 const fillQualifyForm = (data: any) => {
@@ -435,6 +639,58 @@ const fillQualifyForm = (data: any) => {
 
 /* ===== 数据加载 ===== */
 /** attempts 挂到 issue 上，右栏组件直接读，避免重复请求 */
+/* ===== 负责人 / 截止日期 / 标签 ===== */
+const assignees = ref<Assignee[]>([])
+const assignee = ref<string>('')
+const dueDate = ref<string>('')
+const tags = ref<string[]>([])
+const tagInput = ref('')
+
+const loadAssignees = async () => {
+  try {
+    const r = await getAssignees()
+    assignees.value = r.users || []
+  } catch {
+    assignees.value = []
+  }
+}
+
+/** 单个字段保存：三个字段各自改，没必要整条回写 */
+const saveField = async (field: string, value: any) => {
+  await patchIssue(id.value, { [field]: value })
+  if (issue.value) issue.value[field] = value
+  ElMessage.success('已保存')
+}
+
+const addTag = async () => {
+  const t = tagInput.value.trim()
+  tagInput.value = ''
+  if (!t || tags.value.includes(t)) return
+  tags.value = [...tags.value, t]
+  await saveField('tags', tags.value)
+}
+
+const removeTag = async (t: string) => {
+  tags.value = tags.value.filter((x) => x !== t)
+  await saveField('tags', tags.value)
+}
+
+/** 截止日期提示：逾期红、3 天内黄、已解决/不修就不提示 */
+const dueHint = computed(() => {
+  const d = issue.value?.due_date
+  if (!d) return null
+  const st = issue.value?.status
+  if (st === '已解决' || st === '不修' || st === '无法复现') return null
+  const today = new Date()
+  today.setHours(0, 0, 0, 0)
+  const due = new Date(d + 'T00:00:00')
+  const days = Math.round((due.getTime() - today.getTime()) / 86400000)
+  if (days < 0) return { cls: 'is-over', text: `已逾期 ${-days} 天` }
+  if (days === 0) return { cls: 'is-soon', text: '今天到期' }
+  if (days <= 3) return { cls: 'is-soon', text: `${days} 天后到期` }
+  return null
+})
+
 const applyIssue = (res: any) => {
   res.issue.attempts = res.attempts || []
   issue.value = res.issue
@@ -442,6 +698,13 @@ const applyIssue = (res: any) => {
   events.value = res.events || []
   rawText.value = res.issue.raw_text || ''
   projectId.value = res.issue.project_id ?? null
+  assignee.value = res.issue.assignee || ''
+  dueDate.value = res.issue.due_date || ''
+  try {
+    tags.value = JSON.parse(res.issue.tags || '[]')
+  } catch {
+    tags.value = []
+  }
 }
 
 const load = async () => {
@@ -585,6 +848,10 @@ onMounted(async () => {
   if (ch) channels.value = ch.channels || []
   if (s?.settings?.['ai.channel_id']) channelId.value = Number(s.settings['ai.channel_id'])
   await load()
+  await Promise.all([loadAssignees(), loadComments(), loadLinks()])
+  // 当前用户决定能不能删别人的评论
+  const me = await getMe().catch(() => null)
+  meUser.value = me?.user || null
 })
 </script>
 
@@ -620,6 +887,65 @@ onMounted(async () => {
 .hero-eyebrow { display: flex; align-items: center; gap: 12px; font-size: 12px; color: var(--ih-sub); }
 .hero-title { margin: 8px 0 0; font-size: 26px; font-weight: 750; letter-spacing: -0.4px; line-height: 1.3; }
 .hero-meta { display: flex; gap: 16px; margin-top: 10px; font-size: 12px; color: var(--ih-sub); flex-wrap: wrap; }
+
+/* 关联问题 */
+.link-item {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 7px 10px; border-radius: 10px; margin-bottom: 6px;
+  border: 1px solid var(--ih-line); background: var(--ih-surface);
+}
+.link-kind {
+  font-size: 10.5px; padding: 1px 7px; border-radius: 999px;
+  background: var(--ih-primary-soft); color: var(--ih-primary);
+}
+.link-dir { color: var(--ih-sub); font-size: 12px; }
+.link-title { font-size: 13px; color: var(--ih-ink); cursor: pointer; }
+.link-title:hover { color: var(--ih-primary); text-decoration: underline; }
+.link-status { font-size: 11px; }
+.link-del { margin-left: auto; font-size: 11px; }
+.link-form { display: flex; gap: 8px; align-items: center; margin-top: 10px; flex-wrap: wrap; }
+.link-kind-select { width: 92px; }
+.link-input { width: 160px; }
+
+/* 讨论区 */
+.comment-empty { padding: 14px 4px; font-size: 12.5px; }
+.comment-item {
+  padding: 10px 12px; border-radius: 12px; margin-bottom: 8px;
+  border: 1px solid var(--ih-line); background: var(--ih-surface);
+}
+.comment-head { display: flex; align-items: center; gap: 8px; margin-bottom: 5px; }
+.comment-author { font-size: 12.5px; font-weight: 600; color: var(--ih-ink); }
+.comment-time { font-size: 11px; color: var(--ih-sub); }
+.comment-del { margin-left: auto; font-size: 11px; }
+.comment-body { font-size: 13px; line-height: 1.65; color: var(--ih-ink); white-space: pre-wrap; word-break: break-word; }
+.comment-form { margin-top: 12px; }
+.comment-form-foot { display: flex; align-items: center; justify-content: space-between; margin-top: 8px; font-size: 11.5px; }
+.event-actor { font-size: 11px; color: var(--ih-primary); }
+
+/* 负责人 / 截止 / 标签 */
+.meta-row {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--ih-line);
+}
+.meta-label { font-size: 12px; color: var(--ih-sub); }
+.meta-select { width: 120px; }
+.meta-date { width: 130px; }
+.due-hint { font-size: 11.5px; padding: 1px 7px; border-radius: 999px; }
+.due-hint.is-over { background: rgba(240, 68, 56, 0.12); color: #f04438; }
+.due-hint.is-soon { background: rgba(247, 144, 9, 0.14); color: #f79009; }
+
+.tag-wrap { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.tag-chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 1px 8px; border-radius: 999px; font-size: 11.5px;
+  background: var(--ih-primary-soft); color: var(--ih-primary);
+}
+.tag-x {
+  cursor: pointer; font-style: normal; opacity: 0.6; font-size: 13px; line-height: 1;
+}
+.tag-x:hover { opacity: 1; }
+.tag-input { width: 84px; }
+.tag-input :deep(.el-input__inner) { font-size: 11.5px; }
 .hero-side { display: flex; flex-direction: column; align-items: flex-end; gap: 12px; }
 .hero-badges { display: flex; gap: 8px; align-items: center; }
 .badge { padding: 2px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; }
@@ -637,11 +963,6 @@ onMounted(async () => {
 .opt-repos { float: right; margin-left: 12px; font-size: 11px; color: var(--ih-sub); }
 
 /* ---------- 面板（含折叠） ---------- */
-.panel { padding: 18px 20px; }
-.panel-head {
-  display: flex; justify-content: space-between; align-items: flex-start;
-  gap: 12px; flex-wrap: wrap; margin-bottom: 14px;
-}
 .panel-head.is-toggle {
   cursor: pointer; user-select: none; justify-content: flex-start; margin-bottom: 0;
 }
@@ -671,8 +992,6 @@ onMounted(async () => {
   background: linear-gradient(135deg, var(--ih-primary), var(--ih-primary-2));
   box-shadow: 0 6px 14px rgba(79, 70, 229, 0.25);
 }
-.step-badge--gray { background: var(--ih-soft-2); color: var(--ih-sub); box-shadow: none; }
-.panel-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .panel-foot { display: flex; justify-content: flex-end; }
 .provider-select { width: 130px; }
 

@@ -195,3 +195,32 @@ html.dark ::-webkit-scrollbar-thumb:hover { background: #3d4554; }
   .el-dialog { border-radius: 0; }
   .el-message { min-width: auto; max-width: 88vw; }
 }
+
+/* ========== 面板头部（多页面共用）==========
+   原来 Settings.vue 和 IssueDetail.vue 各写了一份几乎一样的，
+   拆出 AccountPanel 组件后 scoped 样式传不进去，索性提到全局：
+   通用结构放这里，页面特有的（折叠箭头、间距）留在各自文件。 */
+.panel { padding: 18px 20px; }
+.panel-head {
+  display: flex; justify-content: space-between; align-items: flex-start;
+  gap: 12px; flex-wrap: wrap; margin-bottom: 14px;
+}
+.panel-title { display: flex; gap: 12px; align-items: flex-start; flex: 1 1 260px; min-width: 0; }
+.panel-title h2 { margin: 0; font-size: 16px; font-weight: 700; color: var(--ih-ink); }
+.panel-title p { margin: 3px 0 0; font-size: 12px; color: var(--ih-sub); }
+.panel-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.step-badge {
+  flex: 0 0 auto; min-width: 28px; height: 28px; padding: 0 8px; border-radius: 9px;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 12px; font-weight: 700; color: #fff;
+  background: linear-gradient(135deg, var(--ih-primary), var(--ih-primary-2));
+}
+.step-badge--blue { background: linear-gradient(135deg, #1570ef, #2e90fa); }
+.step-badge--gray { background: var(--ih-soft-2); color: var(--ih-sub); }
+
+@media (max-width: 768px) {
+  .panel { padding: 14px; }
+  .panel-head { flex-wrap: wrap; }
+  .panel-title { flex: 1 1 100%; }
+  .panel-actions { width: 100%; justify-content: flex-end; }
+}

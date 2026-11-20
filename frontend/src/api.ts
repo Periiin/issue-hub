@@ -52,6 +52,15 @@ export const login = (username: string, password: string) =>
 
 export const logout = () => api.post('/auth/logout').then((r) => r.data)
 
+/** 可选负责人（精简信息，普通用户也能拿到） */
+export interface Assignee {
+  username: string
+  displayName: string
+}
+
+export const getAssignees = () =>
+  api.get<{ users: Assignee[] }>('/auth/assignees').then((r) => r.data)
+
 export const getMe = () =>
   api.get<{ user: AuthUser }>('/auth/me').then((r) => r.data)
 
@@ -127,6 +136,55 @@ export interface Attachment {
 
 export const listIssues = (params: Record<string, any>) =>
   api.get('/issues', { params }).then((r) => r.data)
+
+/** 周报 Markdown 原文（days=0 表示本周） */
+export const getWeeklyReport = (days = 0) =>
+  api.get<string>('/report/weekly', { params: { days }, responseType: 'text' })
+    .then((r) => (typeof r.data === 'string' ? r.data : String(r.data)))
+
+/** 批量改：只传要改的字段 */
+export const batchPatchIssues = (data: Record<string, any>) =>
+  api.post('/issues/batch', data).then((r) => r.data)
+
+export const batchDeleteIssues = (ids: number[]) =>
+  api.post('/issues/batch/delete', { ids }).then((r) => r.data)
+
+export interface IssueLink {
+  id: number
+  kind: string
+  kindLabel: string
+  target_id: number
+  direction: 'in' | 'out'
+  title: string
+  status: string
+  created_at: string
+}
+
+export const listLinks = (issueId: number) =>
+  api.get<{ links: IssueLink[] }>(`/issues/${issueId}/links`).then((r) => r.data)
+
+export const addLink = (issueId: number, otherId: number, kind = 'duplicate') =>
+  api.post(`/issues/${issueId}/links`, { other_id: otherId, kind }).then((r) => r.data)
+
+export const removeLink = (issueId: number, linkId: number) =>
+  api.delete(`/issues/${issueId}/links/${linkId}`).then((r) => r.data)
+
+export interface IssueComment {
+  id: number
+  author: string
+  author_id: number | null
+  body: string
+  created_at: string
+}
+
+export const listComments = (issueId: number) =>
+  api.get<{ comments: IssueComment[] }>(`/issues/${issueId}/comments`).then((r) => r.data)
+
+export const addComment = (issueId: number, body: string) =>
+  api.post<{ comment: IssueComment }>(`/issues/${issueId}/comments`, { body }).then((r) => r.data)
+
+export const deleteComment = (issueId: number, commentId: number) =>
+  api.delete(`/issues/${issueId}/comments/${commentId}`).then((r) => r.data)
 
 export const createIssue = (data: Record<string, any>) =>
   api.post('/issues', data).then((r) => r.data)

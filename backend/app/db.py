@@ -28,6 +28,9 @@ CREATE TABLE IF NOT EXISTS issue (
     fix_state       TEXT,                        -- JSON：按仓库分组的 worktree/branch/diff 状态
     project_id      INTEGER,                     -- 所属项目（project 表），决定默认代码范围与仓库
     owner_id        INTEGER,                     -- 归属用户（app_user.id）；NULL=本机/历史数据
+    assignee        TEXT,                        -- 负责人（app_user.username，空=未分配）
+    due_date        TEXT,                        -- 承诺给甲方的截止日期 YYYY-MM-DD
+    tags            TEXT,                        -- JSON 数组，如 ["支付","小程序"]
     created_at      TEXT NOT NULL,
     updated_at      TEXT NOT NULL
 );
@@ -200,6 +203,28 @@ CREATE TABLE IF NOT EXISTS event (
 );
 CREATE INDEX IF NOT EXISTS idx_event_issue ON event(issue_id);
 
+-- 讨论区：甲方追问、内部讨论都走这里（比「备注」能看出对话关系）
+CREATE TABLE IF NOT EXISTS comment (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    issue_id   INTEGER NOT NULL,
+    author     TEXT NOT NULL,          -- 显示名
+    author_id  INTEGER,                -- app_user.id，可为空（本机模式）
+    body       TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_comment_issue ON comment(issue_id);
+
+-- 重复问题关联：同一 bug 甲方分几次提时把它们连起来
+CREATE TABLE IF NOT EXISTS issue_link (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    issue_id  INTEGER NOT NULL,
+    other_id  INTEGER NOT NULL,
+    kind      TEXT NOT NULL DEFAULT 'duplicate',   -- duplicate / related / blocks
+    created_at TEXT NOT NULL,
+    UNIQUE(issue_id, other_id)
+);
+CREATE INDEX IF NOT EXISTS idx_link_issue ON issue_link(issue_id);
+
 CREATE TABLE IF NOT EXISTS setting (
     key   TEXT PRIMARY KEY,
     value TEXT
@@ -234,6 +259,9 @@ def init_db() -> None:
             ("fix_state", "ALTER TABLE issue ADD COLUMN fix_state TEXT"),
             ("project_id", "ALTER TABLE issue ADD COLUMN project_id INTEGER"),
             ("owner_id", "ALTER TABLE issue ADD COLUMN owner_id INTEGER"),
+            ("assignee", "ALTER TABLE issue ADD COLUMN assignee TEXT"),
+            ("due_date", "ALTER TABLE issue ADD COLUMN due_date TEXT"),
+            ("tags", "ALTER TABLE issue ADD COLUMN tags TEXT"),
         ):
             if column not in existing:
                 conn.execute(ddl)
@@ -290,11 +318,16 @@ def save_settings(values: dict[str, str]) -> None:
 
 def add_event(conn: sqlite3.Connection, issue_id: int, type_: str,
               from_status: str | None = None, to_status: str | None = None,
-              note: str | None = None) -> None:
+              note: str | None = None, actor: str | None = None) -> None:
+    """写一条时间线事件。
+
+    actor 是「谁做的」：多用户下这是审计的关键，之前一直没传，
+    时间线里全是默认值 'me'，等于看不出是谁改的。
+    """
     conn.execute(
-        "INSERT INTO event(issue_id, type, from_status, to_status, note, created_at) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        (issue_id, type_, from_status, to_status, note, now()),
+        "INSERT INTO event(issue_id, type, from_status, to_status, note, actor, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (issue_id, type_, from_status, to_status, note, actor or "me", now()),
     )
 
 

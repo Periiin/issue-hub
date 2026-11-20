@@ -304,7 +304,8 @@ def apply_fix(issue_id: int, payload: FixApplyReq, user: dict = Depends(require_
         note = f"worktree 修改（{provider}）：{len(changed)} 个仓库有改动"
         if failed:
             note += f"，{len(failed)} 个失败"
-        add_event(conn, issue_id, "fix_apply", from_status=issue["status"], to_status="处理中", note=note)
+        add_event(conn, issue_id, "fix_apply", from_status=issue["status"], to_status="处理中",
+                  note=note, actor=user.get("displayName") or user.get("username"))
 
     attempt = _save_attempt(issue_id, provider, state)
     return {"state": state, "diffs": _collect_diffs(state), "context": ctx_file,
@@ -558,7 +559,7 @@ def accept_fix(issue_id: int, payload: FixAcceptReq, user: dict = Depends(requir
         conn.execute("UPDATE issue SET fix_state = ?, status = '待验收', updated_at = ? WHERE id = ?",
                      (json.dumps(state, ensure_ascii=False), now(), issue_id))
         add_event(conn, issue_id, "fix_accept", from_status=issue["status"], to_status="待验收",
-                  note=f"已采纳 {len(accepted)} 个仓库")
+                  note=f"已采纳 {len(accepted)} 个仓库", actor=user.get("displayName") or user.get("username"))
     return {"ok": True, "results": results, "state": state}
 
 
@@ -588,11 +589,12 @@ def reject_fix(issue_id: int, payload: FixRejectReq | None = None,
         with connect() as conn:
             conn.execute("UPDATE issue SET fix_state = ?, updated_at = ? WHERE id = ?",
                          (json.dumps(state, ensure_ascii=False), now(), issue_id))
-            add_event(conn, issue_id, "fix_reject", note=f"已丢弃 {target or '全部'} 的 worktree")
+            add_event(conn, issue_id, "fix_reject",
+                      note=f"已丢弃 {target or '全部'} 的 worktree", actor=user.get("displayName") or user.get("username"))
     else:
         with connect() as conn:
             conn.execute("UPDATE issue SET fix_state = NULL, status = '待处理', updated_at = ? WHERE id = ?",
                          (now(), issue_id))
             add_event(conn, issue_id, "fix_reject", from_status=issue["status"], to_status="待处理",
-                      note="已丢弃 worktree 与分支")
+                      note="已丢弃 worktree 与分支", actor=user.get("displayName") or user.get("username"))
     return {"ok": True, "state": state if repos else None}

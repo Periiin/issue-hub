@@ -7,7 +7,7 @@
         <p class="page-sub">甲方反馈 → AI 定性 → 人工确认 → 定级 → 修复</p>
       </div>
       <div class="head-actions">
-        <el-button round @click="downloadWeekly">导出周报</el-button>
+        <el-button round :loading="weeklyLoading" @click="openWeekly">周报</el-button>
       </div>
     </div>
 
@@ -36,6 +36,15 @@
         >
           {{ s }} <b>{{ data.counts[s] || 0 }}</b>
         </button>
+        <div class="chip-sep" />
+        <button
+          class="chip chip--mine" :class="{ 'is-on': filters.mine === 'assigned' }"
+          title="分配给我的" @click="setMine('assigned')"
+        >@ 我的</button>
+        <button
+          class="chip chip--mine" :class="{ 'is-on': filters.mine === 'reported' }"
+          title="我提的" @click="setMine('reported')"
+        >我提的</button>
       </div>
 
       <div v-if="!isMobile" class="filter-row">
@@ -43,13 +52,24 @@
           <el-option v-for="p in ['P0', 'P1', 'P2', 'P3']" :key="p" :label="p" :value="p" />
         </el-select>
         <el-input v-model="filters.module" placeholder="模块" clearable class="w-140" />
+        <el-select v-model="filters.tag" placeholder="标签" clearable class="w-120">
+          <el-option v-for="t in data.tags || []" :key="t" :label="t" :value="t" />
+        </el-select>
+        <el-select v-model="filters.due" placeholder="截止" clearable class="w-120">
+          <el-option label="已逾期" value="overdue" />
+          <el-option label="7 天内到期" value="week" />
+        </el-select>
+        <el-select v-model="filters.mine" placeholder="我的" clearable class="w-120">
+          <el-option label="分配给我" value="assigned" />
+          <el-option label="我提的" value="reported" />
+        </el-select>
         <el-input
           v-model="filters.q" placeholder="搜标题/原文/描述/模块/提出人"
-          clearable class="w-260" @keyup.enter="applyFilter"
+          clearable class="w-240" @keyup.enter="applyFilter"
         />
         <el-button type="primary" plain @click="applyFilter">查询</el-button>
         <div class="spacer" />
-        <span class="ih-muted">共 {{ total }} 条</span>
+        <span class="ih-muted count-label">共 {{ total }} 条</span>
       </div>
       <div v-else class="filter-row filter-row--mobile">
         <el-select v-model="filters.priority" placeholder="优先级" clearable class="w-110">
@@ -66,16 +86,39 @@
       </div>
     </div>
 
+    <!-- 批量操作条：选中后才出现 -->
+    <div v-if="selectedIds.length" class="batch-bar ih-card">
+      <span class="batch-count">已选 <b>{{ selectedIds.length }}</b> 条</span>
+      <div class="batch-actions">
+        <el-select v-model="batchForm.status" placeholder="改状态" clearable size="small" class="batch-select">
+          <el-option v-for="s in statusOrder" :key="s" :label="s" :value="s" />
+        </el-select>
+        <el-select v-model="batchForm.priority" placeholder="改优先级" clearable size="small" class="batch-select">
+          <el-option v-for="p in ['P0', 'P1', 'P2', 'P3']" :key="p" :label="p" :value="p" />
+        </el-select>
+        <el-button size="small" type="primary" round :loading="batchSaving" @click="applyBatch">应用</el-button>
+        <el-button size="small" round @click="clearSelection">取消选择</el-button>
+        <el-button size="small" type="danger" plain round @click="removeSelected">删除</el-button>
+      </div>
+    </div>
+
     <!-- 列表：桌面表格 -->
     <div v-if="!isMobile" class="table-card ih-card">
-      <el-table :data="data.list" row-key="id" class="clickable" @row-click="goDetail">
+      <el-table
+        ref="tableRef" :data="data.list" row-key="id" class="clickable"
+        @row-click="goDetail" @selection-change="onSelectionChange"
+      >
+        <el-table-column type="selection" width="44" :selectable="() => true" />
         <el-table-column label="#" width="64">
           <template #default="{ row }"><span class="ih-mono ih-muted">#{{ row.id }}</span></template>
         </el-table-column>
         <el-table-column label="问题" min-width="280">
           <template #default="{ row }">
             <div class="cell-title">{{ row.title }}</div>
-            <div class="cell-sub">{{ row.module || '未标注模块' }} · {{ row.created_at }}</div>
+            <div class="cell-sub">
+              {{ row.module || '未标注模块' }} · {{ row.created_at }}
+              <span v-for="t in parseTags(row.tags)" :key="t" class="cell-tag">{{ t }}</span>
+            </div>
           </template>
         </el-table-column>
         <el-table-column label="优先级" width="92">
@@ -91,7 +134,18 @@
             <span class="status"><i :class="['dot', dotClass(row.status)]" />{{ row.status }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="提出人" width="110">
+        <el-table-column label="负责人" width="96">
+          <template #default="{ row }">
+            <span :class="row.assignee ? '' : 'ih-muted'">{{ row.assignee || '—' }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="截止" width="104">
+          <template #default="{ row }">
+            <span v-if="!row.due_date" class="ih-muted">—</span>
+            <span v-else :class="['due-cell', dueClass(row)]">{{ row.due_date.slice(5) }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="提出人" width="96">
           <template #default="{ row }"><span class="ih-muted">{{ row.reporter || '—' }}</span></template>
         </el-table-column>
       </el-table>
@@ -123,7 +177,8 @@
           </div>
           <div class="m-foot">
             <span>{{ row.module || '未标注模块' }}</span>
-            <span>{{ row.reporter || '—' }}</span>
+            <span v-if="row.assignee">@{{ row.assignee }}</span>
+            <span v-if="row.due_date" :class="['due-cell', dueClass(row)]">截止 {{ row.due_date.slice(5) }}</span>
             <span>{{ (row.created_at || '').slice(5, 16) }}</span>
           </div>
         </article>
@@ -135,6 +190,27 @@
         </div>
       </template>
     </div>
+
+    <!-- 周报 -->
+    <el-dialog
+      v-model="weeklyVisible" title="问题跟踪周报"
+      :width="isMobile ? '100%' : '760px'" :fullscreen="isMobile" append-to-body
+    >
+      <div class="weekly-bar">
+        <el-radio-group v-model="weeklyDays" size="small" @change="loadWeekly">
+          <el-radio-button :value="0">本周</el-radio-button>
+          <el-radio-button :value="7">最近 7 天</el-radio-button>
+          <el-radio-button :value="30">最近 30 天</el-radio-button>
+        </el-radio-group>
+        <div class="spacer" />
+        <el-button size="small" round @click="copyWeekly">复制 Markdown</el-button>
+        <el-button size="small" round @click="downloadWeekly">下载 .md</el-button>
+      </div>
+      <pre class="weekly-pre">{{ weeklyText }}</pre>
+      <template #footer>
+        <el-button @click="weeklyVisible = false">关闭</el-button>
+      </template>
+    </el-dialog>
 
     <!-- 新建问题 -->
     <el-dialog
@@ -196,18 +272,23 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
-import { createIssue, listIssues, uploadAttachments } from '../api'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import {
+  batchDeleteIssues, batchPatchIssues, createIssue, getWeeklyReport,
+  listIssues, uploadAttachments
+} from '../api'
 import { useMobile } from '../useMobile'
 
 const route = useRoute()
 const router = useRouter()
 const isMobile = useMobile()
 
-const data = ref<{ list: any[]; counts: Record<string, number>; statuses: string[] }>({
-  list: [], counts: {}, statuses: []
+const data = ref<{
+  list: any[]; counts: Record<string, number>; statuses: string[]; tags?: string[]
+}>({ list: [], counts: {}, statuses: [], tags: [] })
+const filters = reactive({
+  status: '', priority: '', module: '', q: '', tag: '', due: '', mine: ''
 })
-const filters = reactive({ status: '', priority: '', module: '', q: '' })
 const loading = ref(false)
 
 const createVisible = ref(false)
@@ -266,13 +347,132 @@ const load = async () => {
   }
 }
 
+/** 「我的」是个开关：点一次筛选，再点一次取消 */
+const setMine = (mode: string) => {
+  filters.mine = filters.mine === mode ? '' : mode
+  page.value = 1
+  load()
+}
+
 const setStatus = (s: string) => {
   filters.status = s
   page.value = 1
   load()
 }
+const parseTags = (raw: string | null) => {
+  if (!raw) return []
+  try {
+    const v = JSON.parse(raw)
+    return Array.isArray(v) ? v : []
+  } catch {
+    return []
+  }
+}
+
+/** 截止日期着色：逾期红、3 天内黄；已关闭的不提示 */
+const dueClass = (row: any) => {
+  if (!row.due_date) return ''
+  if (['已解决', '不修', '无法复现'].includes(row.status)) return ''
+  const today = new Date()
+  today.setHours(0, 0, 0, 0)
+  const days = Math.round(
+    (new Date(row.due_date + 'T00:00:00').getTime() - today.getTime()) / 86400000
+  )
+  if (days < 0) return 'is-over'
+  if (days <= 3) return 'is-soon'
+  return ''
+}
+
 const goDetail = (row: any) => router.push(`/issues/${row.id}`)
-const downloadWeekly = () => window.open('/api/report/weekly', '_blank')
+/* ---------- 批量操作 ---------- */
+const tableRef = ref<any>(null)
+const selectedIds = ref<number[]>([])
+const batchSaving = ref(false)
+const batchForm = reactive<{ status: string; priority: string }>({ status: '', priority: '' })
+
+const onSelectionChange = (rows: any[]) => {
+  selectedIds.value = rows.map((r) => r.id)
+}
+
+const clearSelection = () => {
+  selectedIds.value = []
+  tableRef.value?.clearSelection?.()
+}
+
+const applyBatch = async () => {
+  const payload: Record<string, any> = { ids: selectedIds.value }
+  if (batchForm.status) payload.status = batchForm.status
+  if (batchForm.priority) payload.priority = batchForm.priority
+  if (!payload.status && !payload.priority) {
+    ElMessage.warning('请先选择要改成什么')
+    return
+  }
+  batchSaving.value = true
+  try {
+    const r = await batchPatchIssues(payload)
+    ElMessage.success(`已更新 ${r.updated} 条` + (r.skipped ? `，${r.skipped} 条无权限已跳过` : ''))
+    batchForm.status = ''
+    batchForm.priority = ''
+    clearSelection()
+    await load()
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.detail || '批量修改失败')
+  } finally {
+    batchSaving.value = false
+  }
+}
+
+const removeSelected = async () => {
+  await ElMessageBox.confirm(
+    `删除选中的 ${selectedIds.value.length} 条问题？附件和记录会一起删掉，不能撤销。`,
+    '提示', { type: 'warning' })
+  const r = await batchDeleteIssues(selectedIds.value)
+  ElMessage.success(`已删除 ${r.deleted} 条` + (r.skipped ? `，${r.skipped} 条无权限已跳过` : ''))
+  clearSelection()
+  await load()
+}
+
+/* ---------- 周报 ---------- */
+const weeklyVisible = ref(false)
+const weeklyLoading = ref(false)
+const weeklyText = ref('')
+const weeklyDays = ref(0)
+
+const loadWeekly = async () => {
+  weeklyLoading.value = true
+  try {
+    weeklyText.value = await getWeeklyReport(weeklyDays.value)
+  } catch (e: any) {
+    weeklyText.value = `生成失败：${e?.response?.data?.detail || e?.message || '未知错误'}`
+  } finally {
+    weeklyLoading.value = false
+  }
+}
+
+const openWeekly = async () => {
+  weeklyVisible.value = true
+  if (!weeklyText.value) await loadWeekly()
+}
+
+const copyWeekly = async () => {
+  try {
+    await navigator.clipboard.writeText(weeklyText.value)
+    ElMessage.success('已复制，可直接粘到群里')
+  } catch {
+    // 非 https 下 clipboard 不可用，退回选中文本让用户手动复制
+    ElMessage.warning('当前环境不支持自动复制，请手动选中文本复制')
+  }
+}
+
+const downloadWeekly = () => {
+  const blob = new Blob([weeklyText.value], { type: 'text/markdown;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `问题周报-${new Date().toISOString().slice(0, 10)}.md`
+  a.click()
+  URL.revokeObjectURL(url)
+}
 
 const openCreate = () => {
   form.raw_text = ''
@@ -352,7 +552,15 @@ onMounted(load)
 }
 .chip.is-on b { color: rgba(255, 255, 255, 0.85); }
 
-.filter-row { display: flex; gap: 8px; align-items: center; }
+.filter-row {
+  display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+}
+/* el-select 默认 flex-shrink:1 会被挤成「优...」，固定住宽度 */
+.filter-row :deep(.el-select),
+.filter-row :deep(.el-input) { flex: 0 0 auto; }
+/* 搜索框吃剩余空间，但别小于 180px */
+.filter-row :deep(.w-240) { flex: 1 1 180px; min-width: 180px; }
+.count-label { white-space: nowrap; flex: 0 0 auto; }
 .filter-row--mobile { justify-content: space-between; }
 .spacer { flex: 1; }
 .w-110 { width: 110px; }
@@ -361,6 +569,47 @@ onMounted(load)
 .w-200 { width: 200px; }
 .w-260 { width: 260px; }
 .w-full { width: 100%; }
+
+@media (max-width: 1240px) {
+  /* 一行放不下 6 个控件，让搜索框独占第二排 */
+  .filter-row :deep(.w-240) { flex: 1 1 100%; }
+}
+
+/* 状态 chips 里的「我的」快捷入口 */
+.chip-sep { width: 1px; height: 18px; background: var(--ih-line); margin: 0 4px; }
+.chip--mine { font-size: 12px; }
+
+/* 标签与截止 */
+.cell-tag {
+  display: inline-block; margin-left: 5px; padding: 0 6px;
+  border-radius: 999px; font-size: 10.5px;
+  background: var(--ih-primary-soft); color: var(--ih-primary);
+}
+.due-cell { font-size: 11.5px; }
+.due-cell.is-over { color: #f04438; font-weight: 600; }
+.due-cell.is-soon { color: #f79009; font-weight: 600; }
+
+/* 批量操作条 */
+.batch-bar {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding: 10px 14px; margin-bottom: 10px;
+  border: 1px solid var(--ih-primary);
+  background: var(--ih-primary-soft);
+}
+.batch-count { font-size: 13px; color: var(--ih-ink); }
+.batch-count b { color: var(--ih-primary); }
+.batch-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-left: auto; }
+.batch-select { width: 130px; }
+
+/* 周报 */
+.weekly-bar { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
+.weekly-pre {
+  margin: 0; padding: 14px 16px; max-height: 56vh; overflow: auto;
+  border-radius: 12px; border: 1px solid var(--ih-line); background: var(--ih-soft);
+  font-size: 12.5px; line-height: 1.75; color: var(--ih-ink);
+  white-space: pre-wrap; word-break: break-word;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
 
 /* 分页条 */
 .pager {

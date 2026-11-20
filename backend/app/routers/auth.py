@@ -199,6 +199,20 @@ def users(request: Request):
     return {"users": auth.list_users()}
 
 
+@router.get("/assignees")
+def assignees(request: Request):
+    """可选负责人列表（只给用户名和显示名）。
+
+    普通用户也要能选负责人，但不该看到角色/停用状态/创建时间这些管理字段，
+    所以单独开一个精简接口，而不是放宽 /users 的权限。
+    """
+    require_user(request)
+    return {"users": [
+        {"username": u["username"], "displayName": u.get("display_name") or u["username"]}
+        for u in auth.list_users() if u.get("enabled")
+    ]}
+
+
 @router.post("/users")
 def add_user(payload: UserCreateReq, request: Request):
     require_admin(request)
