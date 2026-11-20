@@ -59,7 +59,7 @@ def _json_or_none(raw: str | None):
 @router.get("")
 def list_issues(status: str = "", priority: str = "", module: str = "",
                 q: str = "", tag: str = "", assignee: str = "",
-                due: str = "", mine: str = "",
+                due: str = "", mine: str = "", project_id: int = 0,
                 limit: int = Query(50, ge=1, le=200),
                 offset: int = Query(0, ge=0),
                 user: dict = Depends(require_user)):
@@ -101,6 +101,13 @@ def list_issues(status: str = "", priority: str = "", module: str = "",
             today = datetime.date.today()
             where.append("due_date >= ? AND due_date <= ?")
             args += [today.isoformat(), (today + datetime.timedelta(days=7)).isoformat()]
+    if project_id:
+        # project_id=-1 表示「未归属」，0 表示不筛
+        if project_id == -1:
+            where.append("project_id IS NULL")
+        else:
+            where.append("project_id = ?")
+            args.append(project_id)
     if mine:
         # mine=assigned 分配给我的；mine=reported 我提的
         me_name = user.get("username") or ""
@@ -133,9 +140,61 @@ def list_issues(status: str = "", priority: str = "", module: str = "",
             count_sql += " WHERE " + owner_sql
         count_sql += " GROUP BY status"
         counts = {r["status"]: r["n"] for r in conn.execute(count_sql, owner_args).fetchall()}
+        project_counts = _project_counts(conn, owner_sql, owner_args)
     return {"list": rows, "counts": counts, "statuses": ALL_STATUS,
             "total": total, "limit": limit, "offset": offset,
-            "tags": _all_tags(conn, owner_sql, owner_args)}
+            "tags": _all_tags(conn, owner_sql, owner_args),
+            "projectCounts": project_counts,
+            "unassigned": project_counts.get("none", 0)}
+
+
+def guess_project_id(module: str = "", code_scopes: list[str] | None = None) -> int | None:
+    """按代码路径或模块名猜项目归属（只做预填，不强制）。
+
+    两条线索：
+    1. code_scopes 里出现某个项目的仓库路径 —— 最准，直接取
+    2. 模块名里包含项目名（如模块「gym 会员详情」）—— 次准，只在唯一命中时用
+
+    猜错比不猜更糟（问题跑到别人项目下更难发现），所以拿不准就返回 None。
+    """
+    from .. import projects as proj
+
+    all_projects = proj.list_projects(include_ignored=True)
+    if not all_projects:
+        return None
+
+    for scope in (code_scopes or []):
+        if not scope:
+            continue
+        for p in all_projects:
+            for repo in p.get("repos") or []:
+                # 用前缀匹配：scope 可能是仓库子目录
+                if scope == repo or scope.startswith(repo.rstrip("/") + "/"):
+                    return p["id"]
+
+    name = (module or "").strip().lower()
+    if name:
+        hits = [p for p in all_projects if p["name"].lower() in name]
+        if len(hits) == 1:
+            return hits[0]["id"]
+    return None
+
+
+def _project_counts(conn, owner_sql: str, owner_args: list) -> dict:
+    """各项目的问题数（给项目 chips 的角标）。
+
+    不受当前筛选影响，否则点进某个项目后其他项目的角标全变 0，
+    就看不出「哪个项目问题多」了。
+    """
+    sql = "SELECT project_id, COUNT(*) n FROM issue"
+    if owner_sql:
+        sql += f" WHERE {owner_sql}"
+    sql += " GROUP BY project_id"
+    out: dict = {}
+    for r in conn.execute(sql, owner_args).fetchall():
+        key = r["project_id"] if r["project_id"] is not None else "none"
+        out[key] = r["n"]
+    return out
 
 
 def _all_tags(conn, owner_sql: str, owner_args: list) -> list[str]:
@@ -158,12 +217,14 @@ def _all_tags(conn, owner_sql: str, owner_args: list) -> list[str]:
 def create_issue(payload: IssueCreate, user: dict = Depends(require_user)):
     title = (payload.title or "").strip() or (payload.raw_text or "").strip()[:30] or "未命名问题"
     ts = now()
+    project_id = payload.project_id or guess_project_id(payload.module, payload.code_scopes)
     with connect() as conn:
         cur = conn.execute(
             "INSERT INTO issue(title, raw_text, source, reporter, module, status, owner_id, "
-            "created_at, updated_at) VALUES (?, ?, ?, ?, ?, '待定性', ?, ?, ?)",
+            "project_id, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, '待定性', ?, ?, ?, ?)",
             (title, payload.raw_text, payload.source, payload.reporter, payload.module,
-             user.get("id") or None, ts, ts),
+             user.get("id") or None, project_id, ts, ts),
         )
         issue_id = cur.lastrowid
         add_event(conn, issue_id, "create", to_status="待定性", note="新建问题",
@@ -395,6 +456,9 @@ def batch_patch(payload: IssueBatchPatch, user: dict = Depends(require_user)):
         if not valid_status(payload.status):
             raise HTTPException(400, f"非法状态：{payload.status}")
         data["status"] = payload.status
+    # project_id 单独处理：0 表示取消归属，要写成 NULL
+    if payload.project_id is not None:
+        data["project_id"] = payload.project_id or None
     for field in ("priority", "severity", "complexity", "assignee", "due_date", "module"):
         value = getattr(payload, field)
         if value is not None:

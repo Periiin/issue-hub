@@ -11,6 +11,8 @@ class IssueCreate(BaseModel):
     reporter: str = ""
     module: str = ""
     code_scopes: list[str] = []
+    # 归属项目；不传时按 module / code_scopes 里的路径自动猜
+    project_id: Optional[int] = None
 
 
 class IssuePatch(BaseModel):
@@ -66,6 +68,8 @@ class IssueBatchPatch(BaseModel):
     assignee: Optional[str] = None
     due_date: Optional[str] = None
     module: Optional[str] = None
+    # 归属项目：0 或 null 表示取消归属
+    project_id: Optional[int] = None
     # 标签是「加」不是「覆盖」：批量打标签的语义是追加
     add_tags: Optional[list[str]] = None
 

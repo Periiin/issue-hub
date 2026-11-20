@@ -19,6 +19,37 @@
         </el-input>
       </div>
 
+      <!-- 项目：第一层归纳。项目多时横向滑动，不换行占两排 -->
+      <div class="proj-chips">
+        <button
+          class="chip chip--proj" :class="{ 'is-on': !filters.project_id }"
+          @click="setProject(0)"
+        >
+          全部项目 <b>{{ totalCount }}</b>
+        </button>
+        <button
+          v-for="p in projectsWithCounts" :key="p.id"
+          class="chip chip--proj" :class="{ 'is-on': filters.project_id === p.id }"
+          @click="setProject(p.id)"
+        >
+          {{ p.name }} <b>{{ p.count }}</b>
+        </button>
+        <button
+          v-if="data.unassigned"
+          class="chip chip--proj chip--warn"
+          :class="{ 'is-on': filters.project_id === -1 }"
+          title="还没归到任何项目" @click="setProject(-1)"
+        >
+          未归属 <b>{{ data.unassigned }}</b>
+        </button>
+
+        <div class="chip-sep" />
+        <button
+          class="chip chip--view" :class="{ 'is-on': grouped }"
+          title="按项目分段显示" @click="toggleGrouped"
+        >{{ grouped ? '✓ ' : '' }}按项目分组</button>
+      </div>
+
       <div class="chips">
         <button
           class="chip"
@@ -96,14 +127,65 @@
         <el-select v-model="batchForm.priority" placeholder="改优先级" clearable size="small" class="batch-select">
           <el-option v-for="p in ['P0', 'P1', 'P2', 'P3']" :key="p" :label="p" :value="p" />
         </el-select>
+        <el-select v-model="batchForm.project_id" placeholder="归属项目" clearable size="small" class="batch-select">
+          <el-option v-for="p in projects" :key="p.id" :label="p.name" :value="p.id" />
+        </el-select>
         <el-button size="small" type="primary" round :loading="batchSaving" @click="applyBatch">应用</el-button>
         <el-button size="small" round @click="clearSelection">取消选择</el-button>
         <el-button size="small" type="danger" plain round @click="removeSelected">删除</el-button>
       </div>
     </div>
 
+    <!-- 分组视图：按项目分段（桌面/手机共用同一套行） -->
+    <div v-if="grouped" class="group-list">
+      <el-skeleton v-if="loading" :rows="4" animated />
+      <template v-else>
+        <section v-for="g in groupedRows" :key="g.id" class="group-block ih-card">
+          <div class="group-head" @click="toggleGroup(g.id)">
+            <span class="group-arrow" :class="{ 'is-open': !collapsedGroups.has(g.id) }" />
+            <span class="group-name">{{ g.name }}</span>
+            <span class="group-count">{{ g.rows.length }} 条</span>
+            <span class="group-dist">
+              <span v-for="d in groupDist(g.rows)" :key="d.status" class="group-dist-item">
+                <i :class="['dot', dotClass(d.status)]" />{{ d.status }} {{ d.n }}
+              </span>
+            </span>
+          </div>
+          <div v-show="!collapsedGroups.has(g.id)" class="group-body">
+            <div
+              v-for="row in g.rows" :key="row.id"
+              class="g-row" @click="goDetail(row)"
+            >
+              <el-checkbox
+                :model-value="selectedIds.includes(row.id)"
+                class="g-check" @click.stop
+                @change="() => toggleSelect(row.id)"
+              />
+              <span class="g-id ih-mono ih-muted">#{{ row.id }}</span>
+              <span class="g-title">{{ row.title }}</span>
+              <span :class="priorityClass(row.priority)">{{ row.priority || '未定' }}</span>
+              <span class="status g-status"><i :class="['dot', dotClass(row.status)]" />{{ row.status }}</span>
+              <span class="g-assignee" :class="{ 'ih-muted': !row.assignee }">{{ row.assignee ? '@' + row.assignee : '—' }}</span>
+              <span v-if="row.due_date" :class="['due-cell', dueClass(row)]">{{ row.due_date.slice(5) }}</span>
+              <span class="g-tags">
+                <span v-for="t in parseTags(row.tags)" :key="t" class="cell-tag">{{ t }}</span>
+              </span>
+            </div>
+          </div>
+        </section>
+        <el-empty
+          v-if="!groupedRows.length"
+          description="还没有记录，点右上角「新建问题」开始" :image-size="90"
+        />
+        <p v-if="total > data.list.length" class="group-hint ih-muted">
+          按项目分组时一次最多显示 {{ data.list.length }} 条（共 {{ total }} 条），
+          用上面的项目/状态筛选缩小范围。
+        </p>
+      </template>
+    </div>
+
     <!-- 列表：桌面表格 -->
-    <div v-if="!isMobile" class="table-card ih-card">
+    <div v-else-if="!isMobile" class="table-card ih-card">
       <el-table
         ref="tableRef" :data="data.list" row-key="id" class="clickable"
         @row-click="goDetail" @selection-change="onSelectionChange"
@@ -154,7 +236,7 @@
         description="还没有记录，点右上角「新建问题」开始"
         :image-size="90"
       />
-      <div v-if="total > pageSize" class="pager">
+      <div v-if="total > pageSize && !grouped" class="pager">
         <el-button size="small" round :disabled="page === 1" @click="goPage(page - 1)">上一页</el-button>
         <span class="ih-muted">{{ page }} / {{ maxPage }} 页 · 共 {{ total }} 条</span>
         <el-button size="small" round :disabled="page >= maxPage" @click="goPage(page + 1)">下一页</el-button>
@@ -244,9 +326,21 @@
             </el-tag>
           </div>
         </el-form-item>
+        <el-form-item label="归属项目">
+          <el-select
+            v-model="form.project_id" clearable placeholder="不选则按模块/路径自动判断"
+            class="w-full"
+          >
+            <el-option v-for="p in projects" :key="p.id" :label="p.name" :value="p.id" />
+          </el-select>
+          <div v-if="guessHint" class="field-hint guess-hint">{{ guessHint }}</div>
+        </el-form-item>
         <div class="form-grid">
           <el-form-item label="归属模块">
-            <el-input v-model="form.module" placeholder="如 会员详情/预约记录" />
+            <el-input
+              v-model="form.module" placeholder="如 会员详情/预约记录"
+              @input="refreshGuess"
+            />
           </el-form-item>
           <el-form-item label="提出人">
             <el-input v-model="form.reporter" placeholder="如 王姐" />
@@ -274,7 +368,7 @@ import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
-  batchDeleteIssues, batchPatchIssues, createIssue, getWeeklyReport,
+  batchDeleteIssues, batchPatchIssues, createIssue, getProjects, getWeeklyReport,
   listIssues, uploadAttachments
 } from '../api'
 import { useMobile } from '../useMobile'
@@ -285,15 +379,111 @@ const isMobile = useMobile()
 
 const data = ref<{
   list: any[]; counts: Record<string, number>; statuses: string[]; tags?: string[]
-}>({ list: [], counts: {}, statuses: [], tags: [] })
-const filters = reactive({
-  status: '', priority: '', module: '', q: '', tag: '', due: '', mine: ''
+  projectCounts?: Record<string, number>; unassigned?: number
+}>({ list: [], counts: {}, statuses: [], tags: [], projectCounts: {}, unassigned: 0 })
+
+/** 项目列表（名字来自 /api/projects，计数来自列表接口） */
+const projects = ref<{ id: number; name: string }[]>([])
+const projectsWithCounts = computed(() =>
+  projects.value
+    .map((p) => ({ ...p, count: data.value.projectCounts?.[String(p.id)] || 0 }))
+    // 有问题的排前面，没问题的沉底，但不隐藏（可能正要往里录第一条）
+    .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name))
+)
+
+/* ---------- 分组视图 ---------- */
+const grouped = ref(localStorage.getItem('ih-group-projects') === '1')
+
+const toggleGrouped = () => {
+  grouped.value = !grouped.value
+  localStorage.setItem('ih-group-projects', grouped.value ? '1' : '0')
+  // 两种模式的 limit 不同（分组要一次拉全），切换后必须重拉
+  page.value = 1
+  load()
+}
+
+/** 折叠状态：默认全展开 */
+const collapsedGroups = ref<Set<number>>(new Set())
+
+const toggleGroup = (gid: number) => {
+  const next = new Set(collapsedGroups.value)
+  if (next.has(gid)) next.delete(gid)
+  else next.add(gid)
+  collapsedGroups.value = next
+}
+
+/** 组内状态分布（只用当前显示的这些行算，够看个大概） */
+const groupDist = (rows: any[]) => {
+  const m = new Map<string, number>()
+  for (const r of rows) m.set(r.status, (m.get(r.status) || 0) + 1)
+  return [...m.entries()]
+    .map(([status, n]) => ({ status, n }))
+    .sort((a, b) => b.n - a.n)
+}
+
+/** 分组视图里也能勾选（表格的 checkbox 在分组视图里不存在） */
+const toggleSelect = (id: number) => {
+  const next = new Set(selectedIds.value)
+  if (next.has(id)) next.delete(id)
+  else next.add(id)
+  selectedIds.value = [...next]
+}
+
+/** 按项目把当前页的数据分段（无项目归「未归属」） */
+const groupedRows = computed(() => {
+  const byId = new Map<number, { id: number; name: string; rows: any[] }>()
+  const noProject = { id: 0, name: '未归属', rows: [] as any[] }
+  for (const row of data.value.list) {
+    const pid = row.project_id
+    if (!pid) {
+      noProject.rows.push(row)
+      continue
+    }
+    if (!byId.has(pid)) {
+      const meta = projects.value.find((p) => p.id === pid)
+      byId.set(pid, { id: pid, name: meta?.name || `项目 ${pid}`, rows: [] })
+    }
+    byId.get(pid)!.rows.push(row)
+  }
+  const groups = [...byId.values()].sort((a, b) => b.rows.length - a.rows.length)
+  if (noProject.rows.length) groups.push(noProject)
+  return groups
+})
+const filters = reactive<{
+  status: string; priority: string; module: string; q: string
+  tag: string; due: string; mine: string; project_id: number
+}>({
+  status: '', priority: '', module: '', q: '', tag: '', due: '', mine: '',
+  // 0 = 不筛；-1 = 未归属；其余是项目 id
+  project_id: 0
 })
 const loading = ref(false)
 
 const createVisible = ref(false)
 const saving = ref(false)
-const form = reactive({ raw_text: '', module: '', reporter: '', source: 'wechat' })
+const form = reactive<{
+  raw_text: string; module: string; reporter: string; source: string
+  project_id: number | null
+}>({ raw_text: '', module: '', reporter: '', source: 'wechat', project_id: null })
+
+/**
+ * 按模块名猜项目（和后台同一套规则：项目名是模块名的子串且唯一命中）。
+ * 只做提示，不自动填 —— 猜错比不猜更难发现。
+ */
+const guessProject = computed(() => {
+  const m = (form.module || '').trim().toLowerCase()
+  if (!m) return null
+  const hits = projects.value.filter((p) => m.includes(p.name.toLowerCase()))
+  return hits.length === 1 ? hits[0] : null
+})
+
+const guessHint = computed(() => {
+  if (form.project_id || !guessProject.value) return ''
+  return `看起来属于「${guessProject.value.name}」，保存时会自动归到这个项目`
+})
+
+/** 模块输入后让提示跟着变（computed 已经响应，这里只是占位避免 lint 抱怨） */
+const refreshGuess = () => {}
 const pendingFiles = ref<File[]>([])
 const fileInput = ref<HTMLInputElement | null>(null)
 
@@ -336,8 +526,11 @@ const load = async () => {
   try {
     const res = await listIssues({
       ...filters,
-      limit: pageSize,
-      offset: (page.value - 1) * pageSize
+      // 0 表示不筛，别把 0 传给后端（后端 0 也是不筛，但少个参数更干净）
+      project_id: filters.project_id || undefined,
+      // 分组时一次多拉些，否则同一项目会被翻页切断；分组模式下不翻页
+      limit: grouped.value ? 200 : pageSize,
+      offset: grouped.value ? 0 : (page.value - 1) * pageSize
     })
     data.value = res
     total.value = res.total ?? (res.list || []).length
@@ -348,6 +541,14 @@ const load = async () => {
 }
 
 /** 「我的」是个开关：点一次筛选，再点一次取消 */
+/** 项目 chip：点一次筛选，再点同一项取消 */
+const setProject = (pid: number) => {
+  filters.project_id = filters.project_id === pid ? 0 : pid
+  page.value = 1
+  load()
+}
+
+
 const setMine = (mode: string) => {
   filters.mine = filters.mine === mode ? '' : mode
   page.value = 1
@@ -388,7 +589,9 @@ const goDetail = (row: any) => router.push(`/issues/${row.id}`)
 const tableRef = ref<any>(null)
 const selectedIds = ref<number[]>([])
 const batchSaving = ref(false)
-const batchForm = reactive<{ status: string; priority: string }>({ status: '', priority: '' })
+const batchForm = reactive<{ status: string; priority: string; project_id: number | null }>(
+  { status: '', priority: '', project_id: null }
+)
 
 const onSelectionChange = (rows: any[]) => {
   selectedIds.value = rows.map((r) => r.id)
@@ -403,7 +606,8 @@ const applyBatch = async () => {
   const payload: Record<string, any> = { ids: selectedIds.value }
   if (batchForm.status) payload.status = batchForm.status
   if (batchForm.priority) payload.priority = batchForm.priority
-  if (!payload.status && !payload.priority) {
+  if (batchForm.project_id) payload.project_id = batchForm.project_id
+  if (!payload.status && !payload.priority && !payload.project_id) {
     ElMessage.warning('请先选择要改成什么')
     return
   }
@@ -413,6 +617,7 @@ const applyBatch = async () => {
     ElMessage.success(`已更新 ${r.updated} 条` + (r.skipped ? `，${r.skipped} 条无权限已跳过` : ''))
     batchForm.status = ''
     batchForm.priority = ''
+    batchForm.project_id = null
     clearSelection()
     await load()
   } catch (e: any) {
@@ -475,6 +680,7 @@ const downloadWeekly = () => {
 }
 
 const openCreate = () => {
+  form.project_id = null
   form.raw_text = ''
   form.module = ''
   form.reporter = ''
@@ -515,8 +721,10 @@ const submitCreate = async () => {
   }
   saving.value = true
   try {
+    const guessed = !form.project_id && guessProject.value
     const { id } = await createIssue({ ...form })
     if (pendingFiles.value.length) await uploadAttachments(id, pendingFiles.value)
+    if (guessed) ElMessage.success(`已自动归到「${guessProject.value!.name}」`)
     createVisible.value = false
     router.push(`/issues/${id}`)
   } finally {
@@ -524,7 +732,18 @@ const submitCreate = async () => {
   }
 }
 
-onMounted(load)
+const loadProjects = async () => {
+  try {
+    const r = await getProjects()
+    projects.value = (r.projects || []).map((p: any) => ({ id: p.id, name: p.name }))
+  } catch {
+    projects.value = []
+  }
+}
+
+onMounted(async () => {
+  await Promise.all([load(), loadProjects()])
+})
 </script>
 
 <style scoped>
@@ -570,10 +789,76 @@ onMounted(load)
 .w-260 { width: 260px; }
 .w-full { width: 100%; }
 
+@media (max-width: 768px) {
+  /* 「按项目分组」在横向滑动条里容易被挤出去，单独一行更稳 */
+  .proj-chips { flex-wrap: wrap; overflow-x: visible; }
+  .chip--view { margin-left: auto; }
+
+  /* 分组行在窄屏放不下全部列，隐藏负责人和标签，保留标题+优先级+状态 */
+  .g-assignee, .g-tags { display: none; }
+  .g-row { padding: 9px 12px; gap: 8px; }
+  .group-head { padding: 10px 12px; }
+  .group-dist { margin-left: 0; flex: 1 1 100%; }
+}
+
 @media (max-width: 1240px) {
   /* 一行放不下 6 个控件，让搜索框独占第二排 */
   .filter-row :deep(.w-240) { flex: 1 1 100%; }
 }
+
+.guess-hint { color: var(--ih-primary); }
+
+/* 项目 chips：横向滑动，不换行占两排 */
+.proj-chips {
+  display: flex; align-items: center; gap: 6px;
+  overflow-x: auto; padding-bottom: 2px;
+  scrollbar-width: none;
+}
+.proj-chips::-webkit-scrollbar { display: none; }
+.chip--proj { white-space: nowrap; flex: 0 0 auto; }
+.chip--warn { color: #f79009; }
+.chip--view { flex: 0 0 auto; white-space: nowrap; }
+
+/* 分组视图 */
+.group-list { display: flex; flex-direction: column; gap: 10px; }
+.group-block { padding: 0; overflow: hidden; }
+.group-head {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 12px 16px; cursor: pointer; user-select: none;
+  border-bottom: 1px solid var(--ih-line);
+}
+.group-head:hover { background: var(--ih-soft); }
+.group-arrow {
+  flex: 0 0 auto; width: 8px; height: 8px;
+  border-right: 2px solid var(--ih-sub); border-bottom: 2px solid var(--ih-sub);
+  transform: rotate(-45deg); transition: transform 0.16s ease;
+}
+.group-arrow.is-open { transform: rotate(45deg); }
+.group-name { font-size: 14px; font-weight: 700; color: var(--ih-ink); }
+.group-count {
+  font-size: 11px; padding: 1px 8px; border-radius: 999px;
+  background: var(--ih-primary-soft); color: var(--ih-primary);
+}
+.group-dist { display: flex; gap: 10px; flex-wrap: wrap; margin-left: auto; font-size: 11px; color: var(--ih-sub); }
+.group-dist-item { display: inline-flex; align-items: center; gap: 4px; }
+.group-body { padding: 4px 0; }
+.g-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 16px; cursor: pointer; font-size: 13px;
+  border-bottom: 1px solid var(--ih-line);
+}
+.g-row:last-child { border-bottom: none; }
+.g-row:hover { background: var(--ih-soft); }
+.g-check { flex: 0 0 auto; }
+.g-id { flex: 0 0 auto; font-size: 11.5px; }
+.g-title {
+  flex: 1 1 auto; min-width: 0; color: var(--ih-ink);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.g-status { flex: 0 0 auto; font-size: 11.5px; }
+.g-assignee { flex: 0 0 auto; font-size: 11.5px; }
+.g-tags { flex: 0 0 auto; }
+.group-hint { font-size: 12px; text-align: center; padding: 8px 0; }
 
 /* 状态 chips 里的「我的」快捷入口 */
 .chip-sep { width: 1px; height: 18px; background: var(--ih-line); margin: 0 4px; }
