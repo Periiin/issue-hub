@@ -55,8 +55,14 @@ def _json_or_none(raw: str | None):
 
 @router.get("")
 def list_issues(status: str = "", priority: str = "", module: str = "",
-                q: str = "", limit: int = Query(200, le=500),
+                q: str = "", limit: int = Query(50, ge=1, le=200),
+                offset: int = Query(0, ge=0),
                 user: dict = Depends(require_user)):
+    """问题列表（分页）。
+
+    分页而不是「一次给 200 条」：攒到几百条后老问题会永远看不到，
+    而且前端表格一次渲染几百行很卡。`total` 是当前筛选条件下的总数。
+    """
     where, args = [], []
     owner_sql, owner_args = _owner_filter(user)
     if owner_sql:
@@ -72,22 +78,30 @@ def list_issues(status: str = "", priority: str = "", module: str = "",
         where.append("module LIKE ?")
         args.append(f"%{module}%")
     if q:
-        where.append("(title LIKE ? OR raw_text LIKE ?)")
-        args += [f"%{q}%", f"%{q}%"]
-    sql = "SELECT * FROM issue"
-    if where:
-        sql += " WHERE " + " AND ".join(where)
-    sql += (" ORDER BY CASE priority WHEN 'P0' THEN 0 WHEN 'P1' THEN 1 WHEN 'P2' THEN 2 "
-            "WHEN 'P3' THEN 3 ELSE 4 END, id DESC LIMIT ?")
-    args.append(limit)
+        # 搜索范围要覆盖「确认后的描述」——AI 整理过的现象往往比甲方原话准确，
+        # 只搜 raw_text 会漏掉最该命中的那条
+        like = f"%{q}%"
+        where.append("(title LIKE ? OR raw_text LIKE ? OR module LIKE ? OR reporter LIKE ? "
+                     "OR qualify_final LIKE ?)")
+        args += [like] * 5
+
+    clause = (" WHERE " + " AND ".join(where)) if where else ""
+    order = (" ORDER BY CASE priority WHEN 'P0' THEN 0 WHEN 'P1' THEN 1 WHEN 'P2' THEN 2 "
+             "WHEN 'P3' THEN 3 ELSE 4 END, id DESC")
+
     with connect() as conn:
-        rows = list_rows(conn.execute(sql, args).fetchall())
+        total = conn.execute(f"SELECT COUNT(*) AS c FROM issue{clause}", args).fetchone()["c"]
+        rows = list_rows(conn.execute(
+            f"SELECT * FROM issue{clause}{order} LIMIT ? OFFSET ?",
+            [*args, limit, offset]).fetchall())
+        # 状态计数只按 owner 过滤（不受当前筛选影响），否则 tab 上的数字会变成 0
         count_sql = "SELECT status, COUNT(*) n FROM issue"
         if owner_sql:
             count_sql += " WHERE " + owner_sql
         count_sql += " GROUP BY status"
         counts = {r["status"]: r["n"] for r in conn.execute(count_sql, owner_args).fetchall()}
-    return {"list": rows, "counts": counts, "statuses": ALL_STATUS}
+    return {"list": rows, "counts": counts, "statuses": ALL_STATUS,
+            "total": total, "limit": limit, "offset": offset}
 
 
 @router.post("")
@@ -175,11 +189,11 @@ def patch_issue(issue_id: int, payload: IssuePatch, user: dict = Depends(require
     if "target_repo" in data and "target_repos" not in data:
         data["target_repos"] = json.dumps(
             [data["target_repo"]] if data["target_repo"] else [], ensure_ascii=False)
-    if not data:
-        return {"ok": True}
     data["updated_at"] = now()
     sets = ", ".join(f"{k} = ?" for k in data)
     with connect() as conn:
+        # 归属校验必须在任何「提前返回」之前：否则空请求体能让任何人探到 200，
+        # 虽然不改数据，但等于确认了「这个 id 存在」
         issue = _load_issue(conn, issue_id, user)
         conn.execute(f"UPDATE issue SET {sets} WHERE id = ?", [*data.values(), issue_id])
         if data.get("status") and data["status"] != issue["status"]:

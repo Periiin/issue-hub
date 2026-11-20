@@ -6,7 +6,7 @@ import json
 
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
 from ..config import COMPLEXITIES, PRIORITIES, RUBRIC_VERSION, SEVERITIES
 from ..db import add_event, connect, get_settings, now
@@ -16,15 +16,10 @@ from ..prompts import (QUALIFY_SYSTEM, FIX_SYSTEM, TRIAGE_SYSTEM, build_fix_prom
 from ..schemas import AIRequest, FixRequest, QualifyConfirm
 from ..channels import AIError, run_ai
 from .. import memory as mem
+from ..access import load_issue
+from .auth import require_user
 
 router = APIRouter(prefix="/api/issues", tags=["ai"])
-
-
-def _issue(conn, issue_id: int) -> dict:
-    row = conn.execute("SELECT * FROM issue WHERE id = ?", (issue_id,)).fetchone()
-    if row is None:
-        raise HTTPException(404, "问题不存在")
-    return dict(row)
 
 
 def _record_run(conn, issue_id: int, kind: str, result, ok: bool, error: str | None = None):
@@ -71,10 +66,10 @@ def _common_cwd(scopes: list[str]) -> str | None:
 
 
 @router.post("/{issue_id}/qualify")
-def qualify(issue_id: int, payload: AIRequest):
+def qualify(issue_id: int, payload: AIRequest, user: dict = Depends(require_user)):
     """AI 定性：把甲方原话整理成结构化问题描述（草稿，需人工确认）。"""
     with connect() as conn:
-        issue = _issue(conn, issue_id)
+        issue = load_issue(conn, issue_id, user)
         attachments = [str(a["path"]) for a in conn.execute(
             "SELECT path FROM attachment WHERE issue_id = ?", (issue_id,)).fetchall()]
     # 附件转绝对路径，带工具的 agent（claude/dsh）能直接打开图片
@@ -103,13 +98,15 @@ def qualify(issue_id: int, payload: AIRequest):
 
 
 @router.post("/{issue_id}/qualify/confirm")
-def confirm_qualify(issue_id: int, payload: QualifyConfirm):
+def confirm_qualify(issue_id: int, payload: QualifyConfirm,
+                    user: dict = Depends(require_user)):
     """人工确认定性结果：确认后才允许进入定级。"""
     data = payload.model_dump()
-    if not (data.get("phenomenon") or "").strip():
-        raise HTTPException(400, "请先填写「现象」再确认")
     with connect() as conn:
-        issue = _issue(conn, issue_id)
+        # 先校验归属再看参数：否则 400 的错误信息本身就是「这个 id 存在」的探测信号
+        issue = load_issue(conn, issue_id, user)
+        if not (data.get("phenomenon") or "").strip():
+            raise HTTPException(400, "请先填写「现象」再确认")
         conn.execute(
             "UPDATE issue SET qualify_final = ?, title = ?, module = ?, status = ?, updated_at = ? "
             "WHERE id = ?",
@@ -124,10 +121,10 @@ def confirm_qualify(issue_id: int, payload: QualifyConfirm):
 
 
 @router.post("/{issue_id}/triage")
-def triage(issue_id: int, payload: AIRequest):
+def triage(issue_id: int, payload: AIRequest, user: dict = Depends(require_user)):
     """AI 定级：基于已确认的描述给出 S/复杂度/P，并把结果写回问题。"""
     with connect() as conn:
-        issue = _issue(conn, issue_id)
+        issue = load_issue(conn, issue_id, user)
     if not issue.get("qualify_final"):
         raise HTTPException(400, "还没有确认过的问题描述，先完成定性确认")
     confirmed = json.loads(issue["qualify_final"])
@@ -163,10 +160,11 @@ def triage(issue_id: int, payload: AIRequest):
 
 
 @router.post("/{issue_id}/fix")
-def make_fix_plan(issue_id: int, payload: FixRequest):
+def make_fix_plan(issue_id: int, payload: FixRequest,
+                  user: dict = Depends(require_user)):
     """「操作解决」第一步：让 agent 在仓库里定位根因并给方案（不改代码）。"""
     with connect() as conn:
-        issue = _issue(conn, issue_id)
+        issue = load_issue(conn, issue_id, user)
     if not issue.get("qualify_final"):
         raise HTTPException(400, "还没有确认过的问题描述，先完成定性")
     confirmed = json.loads(issue["qualify_final"])

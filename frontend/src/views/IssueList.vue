@@ -43,17 +43,26 @@
           <el-option v-for="p in ['P0', 'P1', 'P2', 'P3']" :key="p" :label="p" :value="p" />
         </el-select>
         <el-input v-model="filters.module" placeholder="模块" clearable class="w-140" />
-        <el-input v-model="filters.q" placeholder="搜索标题/原文" clearable class="w-200" @keyup.enter="load" />
-        <el-button type="primary" plain @click="load">查询</el-button>
+        <el-input
+          v-model="filters.q" placeholder="搜标题/原文/描述/模块/提出人"
+          clearable class="w-260" @keyup.enter="applyFilter"
+        />
+        <el-button type="primary" plain @click="applyFilter">查询</el-button>
         <div class="spacer" />
-        <span class="ih-muted">共 {{ data.list.length }} 条</span>
+        <span class="ih-muted">共 {{ total }} 条</span>
       </div>
       <div v-else class="filter-row filter-row--mobile">
         <el-select v-model="filters.priority" placeholder="优先级" clearable class="w-110">
           <el-option v-for="p in ['P0', 'P1', 'P2', 'P3']" :key="p" :label="p" :value="p" />
         </el-select>
         <el-input v-model="filters.module" placeholder="模块" clearable class="w-120" />
-        <el-button plain @click="load">筛选</el-button>
+        <el-button plain @click="applyFilter">筛选</el-button>
+      </div>
+      <div v-if="isMobile" class="filter-row filter-row--mobile">
+        <el-input
+          v-model="filters.q" placeholder="搜标题/原文/描述/模块/提出人"
+          clearable class="w-full" @keyup.enter="applyFilter"
+        />
       </div>
     </div>
 
@@ -91,6 +100,11 @@
         description="还没有记录，点右上角「新建问题」开始"
         :image-size="90"
       />
+      <div v-if="total > pageSize" class="pager">
+        <el-button size="small" round :disabled="page === 1" @click="goPage(page - 1)">上一页</el-button>
+        <span class="ih-muted">{{ page }} / {{ maxPage }} 页 · 共 {{ total }} 条</span>
+        <el-button size="small" round :disabled="page >= maxPage" @click="goPage(page + 1)">下一页</el-button>
+      </div>
     </div>
 
     <!-- 列表：手机卡片 -->
@@ -114,6 +128,11 @@
           </div>
         </article>
         <el-empty v-if="!data.list.length" description="还没有记录" :image-size="80" />
+        <div v-if="total > pageSize" class="pager">
+          <el-button size="small" round :disabled="page === 1" @click="goPage(page - 1)">上一页</el-button>
+          <span class="ih-muted">{{ page }} / {{ maxPage }} 页</span>
+          <el-button size="small" round :disabled="page >= maxPage" @click="goPage(page + 1)">下一页</el-button>
+        </div>
       </template>
     </div>
 
@@ -175,7 +194,7 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, reactive, ref, watch } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { createIssue, listIssues, uploadAttachments } from '../api'
@@ -200,6 +219,24 @@ const fileInput = ref<HTMLInputElement | null>(null)
 const statusOrder = ['待定性', '待定级', '待处理', '处理中', '待验收', '已解决', '不修', '无法复现']
 const totalCount = ref(0)
 
+/* ---------- 分页 ---------- */
+const pageSize = 50
+const page = ref(1)
+const total = ref(0)
+const maxPage = computed(() => Math.max(1, Math.ceil(total.value / pageSize)))
+
+const goPage = (n: number) => {
+  if (n < 1 || n > maxPage.value) return
+  page.value = n
+  load()
+}
+
+/** 改筛选条件必须回到第 1 页，否则会停在超出范围的空页 */
+const applyFilter = () => {
+  page.value = 1
+  load()
+}
+
 const priorityClass = (p: string | null) =>
   `pill ${p === 'P0' ? 'pill--p0' : p === 'P1' ? 'pill--p1' : p === 'P2' ? 'pill--p2' : p ? 'pill--p3' : 'pill--none'}`
 
@@ -216,8 +253,13 @@ const dotClass = (s: string) => {
 const load = async () => {
   loading.value = true
   try {
-    const res = await listIssues({ ...filters })
+    const res = await listIssues({
+      ...filters,
+      limit: pageSize,
+      offset: (page.value - 1) * pageSize
+    })
     data.value = res
+    total.value = res.total ?? (res.list || []).length
     totalCount.value = Object.values(res.counts || {}).reduce((a: number, b: any) => a + Number(b), 0)
   } finally {
     loading.value = false
@@ -226,6 +268,7 @@ const load = async () => {
 
 const setStatus = (s: string) => {
   filters.status = s
+  page.value = 1
   load()
 }
 const goDetail = (row: any) => router.push(`/issues/${row.id}`)
@@ -316,6 +359,14 @@ onMounted(load)
 .w-120 { width: 120px; }
 .w-140 { width: 140px; }
 .w-200 { width: 200px; }
+.w-260 { width: 260px; }
+.w-full { width: 100%; }
+
+/* 分页条 */
+.pager {
+  display: flex; align-items: center; justify-content: center;
+  gap: 12px; padding: 14px 0 4px; font-size: 12px;
+}
 
 .table-card { padding: 6px 10px 10px; overflow: hidden; }
 .clickable :deep(tbody tr) { cursor: pointer; }

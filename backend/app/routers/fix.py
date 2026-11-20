@@ -15,7 +15,7 @@
 import json
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
 from .. import context as ctx
 from .. import projects
@@ -29,19 +29,13 @@ from ..fix import (FixError, collect_diff, commit_all, create_worktree, current_
 from ..prompts import APPLY_SYSTEM, build_apply_prompt, parse_apply_report
 from ..channels import AIError, resolve_channel, run_ai
 from ..schemas import (ContextUpdate, FixAcceptReq, FixApplyReq, FixRejectReq)
+from ..access import load_issue
 from .auth import require_user
 
 router = APIRouter(prefix="/api", tags=["fix"])
 
 # 只有能改文件的 agent 允许跑 apply（DeepSeek API 只能出文本）
 WRITE_PROVIDERS = {"claude", "dsh"}
-
-
-def _issue(conn, issue_id: int) -> dict:
-    row = conn.execute("SELECT * FROM issue WHERE id = ?", (issue_id,)).fetchone()
-    if row is None:
-        raise HTTPException(404, "问题不存在")
-    return dict(row)
 
 
 def _json(raw):
@@ -140,7 +134,7 @@ def _norm_state(issue: dict) -> dict:
 # ---------------- 代码范围 / 上下文文件 ----------------
 
 @router.get("/code/roots")
-def code_roots(project_id: int | None = None):
+def code_roots(project_id: int | None = None, user: dict = Depends(require_user)):
     """代码范围候选 + 目标仓库 + 忽略规则 + 项目说明。
 
     传 project_id 时只返回该项目里的仓库（详情页右栏用），
@@ -165,10 +159,10 @@ def code_roots(project_id: int | None = None):
 
 
 @router.get("/issues/{issue_id}/context")
-def get_context(issue_id: int):
+def get_context(issue_id: int, user: dict = Depends(require_user)):
     """读修复上下文文件；不存在时按当前配置生成一份。"""
     with connect() as conn:
-        issue = _issue(conn, issue_id)
+        issue = load_issue(conn, issue_id, user)
     scopes = _json(issue.get("code_scopes")) or []
     repos = [_repo_info(r) for r in _issue_repos(issue)]
     text = ctx.read(issue_id)
@@ -178,19 +172,19 @@ def get_context(issue_id: int):
 
 
 @router.put("/issues/{issue_id}/context")
-def put_context(issue_id: int, payload: ContextUpdate):
+def put_context(issue_id: int, payload: ContextUpdate, user: dict = Depends(require_user)):
     """用户手动保存上下文文件（全文覆盖）。"""
     with connect() as conn:
-        _issue(conn, issue_id)
+        load_issue(conn, issue_id, user)
     p = ctx.write(issue_id, payload.text or "")
     return {"ok": True, "path": str(p)}
 
 
 @router.post("/issues/{issue_id}/context/regenerate")
-def regenerate_context(issue_id: int):
+def regenerate_context(issue_id: int, user: dict = Depends(require_user)):
     """按当前范围/目标仓库重新生成自动区，用户手写区保留。"""
     with connect() as conn:
-        issue = _issue(conn, issue_id)
+        issue = load_issue(conn, issue_id, user)
     scopes = _json(issue.get("code_scopes")) or []
     repos = [_repo_info(r) for r in _issue_repos(issue)]
     text = ctx.ensure(issue_id, issue, repos, scopes, project_notes())
@@ -198,16 +192,18 @@ def regenerate_context(issue_id: int):
 
 
 @router.delete("/issues/{issue_id}/context")
-def delete_context(issue_id: int):
+def delete_context(issue_id: int, user: dict = Depends(require_user)):
+    with connect() as conn:
+        load_issue(conn, issue_id, user)
     return {"ok": ctx.delete(issue_id)}
 
 
 # ---------------- 改代码（多仓库） ----------------
 
 @router.post("/issues/{issue_id}/fix/apply")
-def apply_fix(issue_id: int, payload: FixApplyReq):
+def apply_fix(issue_id: int, payload: FixApplyReq, user: dict = Depends(require_user)):
     with connect() as conn:
-        issue = _issue(conn, issue_id)
+        issue = load_issue(conn, issue_id, user)
     if not issue.get("qualify_final"):
         raise HTTPException(400, "还没有确认过的问题描述，先完成定性")
     confirmed = json.loads(issue["qualify_final"])
@@ -412,10 +408,10 @@ def _attempt_row(row) -> dict:
 
 
 @router.get("/issues/{issue_id}/fix/attempts")
-def fix_attempts(issue_id: int):
+def fix_attempts(issue_id: int, user: dict = Depends(require_user)):
     """修改轮次列表：每轮与方案的出入、发现的问题、实际根因、文件与风险。"""
     with connect() as conn:
-        _issue(conn, issue_id)
+        load_issue(conn, issue_id, user)
     return {"attempts": list_attempts(issue_id)}
 
 
@@ -434,10 +430,10 @@ def _collect_diffs(state: dict) -> dict:
 
 
 @router.get("/issues/{issue_id}/fix/diff")
-def fix_diff(issue_id: int, repo: str | None = None):
+def fix_diff(issue_id: int, repo: str | None = None, user: dict = Depends(require_user)):
     """重新收集 diff。传 repo 只取一个，不传取全部。"""
     with connect() as conn:
-        issue = _issue(conn, issue_id)
+        issue = load_issue(conn, issue_id, user)
     state = _norm_state(issue)
     if not state.get("repos"):
         raise HTTPException(404, "还没有开始修改")
@@ -470,10 +466,10 @@ def fix_diff(issue_id: int, repo: str | None = None):
 
 
 @router.post("/issues/{issue_id}/fix/verify")
-def verify_fix(issue_id: int, repo: str = ""):
+def verify_fix(issue_id: int, repo: str = "", user: dict = Depends(require_user)):
     """只跑验证不提交，用于「先看看能不能编译」。"""
     with connect() as conn:
-        issue = _issue(conn, issue_id)
+        issue = load_issue(conn, issue_id, user)
     state = _norm_state(issue)
     repos = state.get("repos") or {}
     targets = [repo] if repo else [r for r, st in repos.items() if st.get("worktree")]
@@ -499,10 +495,10 @@ def verify_fix(issue_id: int, repo: str = ""):
 
 
 @router.post("/issues/{issue_id}/fix/accept")
-def accept_fix(issue_id: int, payload: FixAcceptReq):
+def accept_fix(issue_id: int, payload: FixAcceptReq, user: dict = Depends(require_user)):
     """采纳：按仓库独立提交/合并。不传 repo 时采纳全部有改动的仓库。"""
     with connect() as conn:
-        issue = _issue(conn, issue_id)
+        issue = load_issue(conn, issue_id, user)
     state = _norm_state(issue)
     repos = state.get("repos") or {}
     if not repos:
@@ -567,10 +563,11 @@ def accept_fix(issue_id: int, payload: FixAcceptReq):
 
 
 @router.post("/issues/{issue_id}/fix/reject")
-def reject_fix(issue_id: int, payload: FixRejectReq | None = None):
+def reject_fix(issue_id: int, payload: FixRejectReq | None = None,
+               user: dict = Depends(require_user)):
     """驳回：丢弃指定仓库的 worktree；不传 repo 时全部丢弃。"""
     with connect() as conn:
-        issue = _issue(conn, issue_id)
+        issue = load_issue(conn, issue_id, user)
     state = _norm_state(issue)
     repos = state.get("repos") or {}
     if not repos:
