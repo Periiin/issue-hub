@@ -361,12 +361,13 @@ export interface MagpieDetect {
   error: string
 }
 
-export const detectMagpie = () =>
-  api.get<MagpieDetect>('/channels/magpie/detect').then((r) => r.data)
+export const detectMagpie = (baseUrl = '', apiKey = '') =>
+  api.get<MagpieDetect>('/channels/magpie/detect',
+    { params: baseUrl ? { base_url: baseUrl, api_key: apiKey } : {} }).then((r) => r.data)
 
-export const importMagpieModels = (models: string[]) =>
+export const importMagpieModels = (models: string[], baseUrl = '', apiKey = '') =>
   api.post<{ ok: boolean; created: string[]; skipped: string[]; baseUrl: string }>(
-    '/channels/magpie/import', { models }).then((r) => r.data)
+    '/channels/magpie/import', { models, base_url: baseUrl, api_key: apiKey }).then((r) => r.data)
 
 export interface Project {
   id: number

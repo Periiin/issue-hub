@@ -362,22 +362,43 @@
       v-model="magpieDrawer" title="从本地 Magpie 导入"
       :size="isMobile ? '100%' : '620px'" append-to-body
     >
+      <!-- 来源：本机（读 gateway.json）或远程（填地址+Key） -->
+      <div class="magpie-source">
+        <el-radio-group v-model="magpieSrc" size="small" @change="onSourceChange">
+          <el-radio-button value="local">本机网关</el-radio-button>
+          <el-radio-button value="remote">远程网关</el-radio-button>
+        </el-radio-group>
+        <template v-if="magpieSrc === 'remote'">
+          <el-input
+            v-model="remoteUrl" size="small" class="magpie-remote-url"
+            placeholder="远程地址，如 http://192.168.110.43:3425"
+          />
+          <el-input
+            v-model="remoteKey" size="small" class="magpie-remote-key"
+            type="password" show-password placeholder="gateway key"
+          />
+        </template>
+        <el-button
+          size="small" round type="primary" plain
+          :loading="magpieLoading" @click="loadMagpie"
+        >探测</el-button>
+      </div>
+
       <div v-if="magpieError" class="magpie-error">
         <b>没能连上 Magpie</b>
         <p>{{ magpieError }}</p>
-        <el-button size="small" round @click="loadMagpie">重试</el-button>
       </div>
 
       <template v-else-if="magpie">
         <div class="magpie-head">
           <div class="magpie-meta">
-            <span class="magpie-ok">已连接</span>
+            <span class="magpie-ok">已连接{{ magpie.remote ? '（远程）' : '' }}</span>
             <code>{{ magpie.baseUrl }}</code>
             <span v-if="magpie.version" class="ih-muted">v{{ magpie.version }}</span>
           </div>
           <p class="field-hint">
-            选中要用的模型，会各建一条通道。Magpie 是本机网关、不校验 Key，
-            导入后不用填任何凭证。
+            选中要用的模型，会各建一条通道。
+            {{ magpie.remote ? '远程网关已带上你填的 Key。' : '本机网关不校验 Key，导入后不用填任何凭证。' }}
           </p>
         </div>
 
@@ -532,11 +553,28 @@ const magpie = ref<MagpieDetect | null>(null)
 const magpieError = ref('')
 const magpiePick = ref<string[]>([])
 
+const magpieSrc = ref<'local' | 'remote'>('local')
+const remoteUrl = ref('')
+const remoteKey = ref('')
+
+const onSourceChange = () => {
+  magpie.value = null
+  magpieError.value = ''
+  magpiePick.value = []
+}
+
 const loadMagpie = async () => {
+  if (magpieSrc.value === 'remote' && !remoteUrl.value.trim()) {
+    magpieError.value = '请先填远程网关地址'
+    return
+  }
   magpieLoading.value = true
   magpieError.value = ''
   try {
-    const d = await detectMagpie()
+    const d = await detectMagpie(
+      magpieSrc.value === 'remote' ? remoteUrl.value.trim() : '',
+      magpieSrc.value === 'remote' ? remoteKey.value.trim() : ''
+    )
     if (!d.running) {
       magpieError.value = d.error || 'Magpie 没有运行'
       magpie.value = null
@@ -573,7 +611,11 @@ const toggleAllMagpie = (checked: any) => {
 const doMagpieImport = async () => {
   magpieImporting.value = true
   try {
-    const r = await importMagpieModels(magpiePick.value)
+    const r = await importMagpieModels(
+      magpiePick.value,
+      magpieSrc.value === 'remote' ? remoteUrl.value.trim() : '',
+      magpieSrc.value === 'remote' ? remoteKey.value.trim() : ''
+    )
     const skipped = r.skipped?.length || 0
     ElMessage.success(
       `已导入 ${r.created.length} 个` + (skipped ? `，${skipped} 个之前导过已跳过` : '')
@@ -963,6 +1005,13 @@ onMounted(async () => {
 .ch-globals { margin-top: 14px; }
 
 /* ===== 从 Magpie 导入 ===== */
+.magpie-source {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin-bottom: 14px; padding-bottom: 12px;
+  border-bottom: 1px dashed var(--ih-line);
+}
+.magpie-remote-url { flex: 1 1 200px; min-width: 160px; }
+.magpie-remote-key { flex: 0 0 170px; }
 .magpie-error {
   padding: 16px; border-radius: 12px;
   border: 1px solid rgba(240, 68, 56, 0.3); background: rgba(240, 68, 56, 0.06);

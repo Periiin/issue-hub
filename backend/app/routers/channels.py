@@ -39,6 +39,9 @@ class ChannelUpdate(BaseModel):
 
 class MagpieImportReq(BaseModel):
     models: list[str] = []
+    # 远程网关：留空 = 本机
+    base_url: str = ""
+    api_key: str = ""
 
 
 class ModelsReq(BaseModel):
@@ -125,13 +128,14 @@ def test(channel_id: int, timeout: Optional[int] = None,
 # ---------------- 从本机 Magpie 导入 ----------------
 
 @router.get("/magpie/detect")
-def magpie_detect(user: dict = Depends(require_user)):
-    """探测本机 Magpie 网关。
+def magpie_detect(base_url: str = "", api_key: str = "",
+                  user: dict = Depends(require_user)):
+    """探测 Magpie 网关。base_url 留空=本机；传了=远程网关（带 key）。
 
-    只读本地配置文件 + 探一次 /v1/models，不写入任何东西。
+    只读配置/探一次 /v1/models，不写入任何东西。
     探测失败不抛异常 —— 前端要拿 error 字段显示「请先启动 Magpie」这类提示。
     """
-    return mg.detect()
+    return mg.detect(base_url, api_key)
 
 
 @router.post("/magpie/import")
@@ -139,7 +143,8 @@ def magpie_import(payload: MagpieImportReq, user: dict = Depends(require_user)):
     """把选中的 Magpie 模型导入成本平台的通道。"""
     owner_id = user.get("id") or None
     try:
-        result = mg.import_models(payload.models, owner_id)
+        result = mg.import_models(payload.models, owner_id,
+                                  payload.base_url, payload.api_key)
     except mg.MagpieError as ex:
         raise HTTPException(400, str(ex))
     return {"ok": True, **result}

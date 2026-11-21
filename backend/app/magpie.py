@@ -44,13 +44,54 @@ def _config_dir() -> Path | None:
     return None
 
 
-def detect() -> dict:
-    """探测本机 Magpie。
+def detect(remote_base_url: str = "", remote_api_key: str = "") -> dict:
+    """探测 Magpie 网关。
+
+    remote_base_url 传了 → 探测远程网关（同网段另一台机器），带 Bearer key；
+    不传 → 读本机 gateway.json（本机进程互信，通常不需要 key）。
 
     返回 {found, running, baseUrl, version, models, error}。
-    found=配置在但没起进程，和 found=False 要分开说 —— 前者让用户去开 Magpie，
-    后者说明这台机器根本没装。
+    本机路径下 found=配置在但没起进程，和 found=False 要分开说 ——
+    前者让用户去开 Magpie，后者说明这台机器根本没装。
     """
+    remote_base_url = (remote_base_url or "").strip()
+    remote_api_key = (remote_api_key or "").strip()
+
+    if remote_base_url:
+        # 远程模式：地址直接用调用方给的；远程网关一般配了 key，必须带上
+        base_url = remote_base_url.rstrip("/")
+        if not base_url.endswith("/v1"):
+            base_url += "/v1"
+        out = {"found": True, "running": False, "baseUrl": base_url,
+               "version": "", "models": [], "error": "", "remote": True,
+               "hasKey": bool(remote_api_key)}
+        headers = {"Authorization": f"Bearer {remote_api_key}"} if remote_api_key else {}
+        try:
+            with httpx.Client(timeout=PROBE_TIMEOUT) as client:
+                resp = client.get(f"{base_url}/models", headers=headers)
+                resp.raise_for_status()
+                data = resp.json()
+        except httpx.ConnectError:
+            out["error"] = f"连不上 {base_url}（对方没开 Magpie 或不在同一网段）"
+            return out
+        except httpx.HTTPStatusError as ex:
+            if ex.response.status_code == 401:
+                out["error"] = "鉴权失败：gateway key 不对或已过期"
+            else:
+                out["error"] = f"Magpie 返回 {ex.response.status_code}：{ex.response.text[:150]}"
+            return out
+        except Exception as ex:
+            out["error"] = f"探测失败：{ex}"
+            return out
+        models = _parse_models(data)
+        if models is None:
+            out["error"] = f"/v1/models 响应格式不对：{str(data)[:150]}"
+            return out
+        out["running"] = True
+        out["models"] = models
+        return out
+
+    # ---------- 本机模式（原逻辑）----------
     cfg_dir = _config_dir()
     if cfg_dir is None:
         return {"found": False, "running": False, "baseUrl": "", "version": "",
@@ -69,7 +110,7 @@ def detect() -> dict:
 
     base_url = f"http://{addr}/v1"
     out = {"found": True, "running": False, "baseUrl": base_url,
-           "version": gw.get("version") or "", "models": [], "error": ""}
+           "version": gw.get("version") or "", "models": [], "error": "", "remote": False}
 
     try:
         with httpx.Client(timeout=PROBE_TIMEOUT) as client:
@@ -86,11 +127,20 @@ def detect() -> dict:
         out["error"] = f"探测失败：{ex}"
         return out
 
-    items = data.get("data") if isinstance(data, dict) else None
-    if not isinstance(items, list):
+    models = _parse_models(data)
+    if models is None:
         out["error"] = f"/v1/models 响应格式不对：{str(data)[:150]}"
         return out
+    out["running"] = True
+    out["models"] = models
+    return out
 
+
+def _parse_models(data) -> list | None:
+    """从 /v1/models 响应里解析模型清单；格式不对返回 None。"""
+    items = data.get("data") if isinstance(data, dict) else None
+    if not isinstance(items, list):
+        return None
     models = []
     for it in items:
         if not isinstance(it, dict):
@@ -102,16 +152,15 @@ def detect() -> dict:
         modalities = (it.get("modalities") or {}).get("input") or []
         models.append({
             "id": str(mid),
-            # 展示名优先用 Magpie 自己给的
             "label": it.get("display_name") or it.get("magpie_label") or str(mid),
             "contextLength": it.get("context_length") or 0,
             # 这两个能力决定它能不能用来改代码（要 tools）和看截图（要 image）
             "tools": "tools" in params,
             "vision": "image" in modalities,
         })
+    return models
 
-    out["running"] = True
-    out["models"] = models
+    # 解析已移到 _parse_models（本机/远程共用），此处不会到达
     return out
 
 
@@ -128,15 +177,19 @@ def _existing_models(base_url: str, owner_id: int | None) -> set[str]:
         return {r["model"] for r in conn.execute(sql, args).fetchall()}
 
 
-def import_models(models: list[str], owner_id: int | None = None) -> dict:
+def import_models(models: list[str], owner_id: int | None = None,
+                  remote_base_url: str = "", remote_api_key: str = "") -> dict:
     """把选中的模型各建一条通道。
+
+    remote_base_url 传了 → 从远程网关导入（通道里带上 api_key）。
 
     返回 {created: [名字], skipped: [模型]}；已存在的不重复建，
     但如果之前被删过（enabled=0 且同名）也不复活 —— 保持用户意图。
     """
-    info = detect()
+    info = detect(remote_base_url, remote_api_key)
     if not info["running"]:
         raise MagpieError(info["error"] or "Magpie 不可用")
+    api_key = remote_api_key if info.get("remote") else ""
 
     base_url = info["baseUrl"]
     available = {m["id"]: m for m in info["models"]}
@@ -163,8 +216,8 @@ def import_models(models: list[str], owner_id: int | None = None) -> dict:
             "name": f"{NAME_PREFIX} · {short}",
             "kind": "api",
             "base_url": base_url,
-            # 本机网关不校验 Key，留空即可；填了也不影响
-            "api_key": "",
+            # 本机网关不校验 Key留空；远程网关带上调用方给的 key
+            "api_key": api_key,
             "model": mid,
             "temperature": 0.2,
             # 改代码要读写多轮，给足轮数
