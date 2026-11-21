@@ -66,6 +66,9 @@ DEFAULT_SETTINGS = {
     "notify.enabled": "0",
     "notify.webhook_kind": "wecom",     # wecom / feishu / dingtalk
     "notify.webhook_url": "",
+    # 对外访问地址（如 http://192.168.110.12:8090）：通知消息里拼详情页链接用，
+    # 不配则消息不带链接
+    "notify.base_url": "",
     # AI 分析代码时的工作目录（单目录，兼容旧配置）
     "repo.root": "/src/gym-fold",
     # 扫描根：一行一个，从这些目录往下找 git 仓库并自动聚成项目。

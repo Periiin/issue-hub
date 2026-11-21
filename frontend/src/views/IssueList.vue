@@ -1,5 +1,14 @@
 <template>
-  <div class="list-page">
+  <div
+    class="list-page"
+    @dragover.prevent="dropActive = true"
+    @dragleave.self="dropActive = false"
+    @drop.prevent="onDropFiles"
+  >
+    <!-- 拖拽遮罩：截图拖进来直接弹新建 -->
+    <div v-if="dropActive" class="drop-mask">
+      <div class="drop-hint">松开即创建问题（图片/PDF 自动作为附件）</div>
+    </div>
     <!-- 页头 -->
     <div class="page-head">
       <div>
@@ -213,7 +222,23 @@
         </el-table-column>
         <el-table-column label="状态" width="110">
           <template #default="{ row }">
-            <span class="status"><i :class="['dot', dotClass(row.status)]" />{{ row.status }}</span>
+            <!-- 内联改状态：不用进详情。span.stop 防止冒泡到行点击 -->
+            <span class="status-cell" @click.stop>
+              <el-dropdown trigger="click" @command="(st: string) => inlineStatus(row, st)">
+                <span class="status inline">
+                  <i :class="['dot', dotClass(row.status)]" />{{ row.status }}
+                  <i class="caret" />
+                </span>
+                <template #dropdown>
+                  <el-dropdown-menu>
+                    <el-dropdown-item
+                      v-for="st in statusOrder" :key="st"
+                      :command="st" :disabled="st === row.status"
+                    >{{ st }}</el-dropdown-item>
+                  </el-dropdown-menu>
+                </template>
+              </el-dropdown>
+            </span>
           </template>
         </el-table-column>
         <el-table-column label="负责人" width="96">
@@ -356,8 +381,13 @@
         </el-form-item>
       </el-form>
       <template #footer>
-        <el-button @click="createVisible = false">取消</el-button>
-        <el-button type="primary" :loading="saving" @click="submitCreate">创建并打开</el-button>
+        <div class="create-foot">
+          <el-checkbox v-model="autoQualify">保存后自动定性</el-checkbox>
+          <el-button @click="createVisible = false">取消</el-button>
+          <el-button type="primary" :loading="saving" @click="submitCreate">
+            {{ autoQualify ? '创建并定性' : '创建并打开' }}
+          </el-button>
+        </div>
       </template>
     </el-dialog>
   </div>
@@ -369,7 +399,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   batchDeleteIssues, batchPatchIssues, createIssue, getProjects, getWeeklyReport,
-  listIssues, uploadAttachments
+  listIssues, patchIssue, uploadAttachments
 } from '../api'
 import { useMobile } from '../useMobile'
 
@@ -597,6 +627,19 @@ const parseTags = (raw: string | null) => {
   }
 }
 
+/** 内联改状态：直接 PATCH，成功后本地更新那行（不整页重拉，保持滚动位置） */
+const inlineStatus = async (row: any, status: string) => {
+  if (status === row.status) return
+  try {
+    await patchIssue(row.id, { status })
+    row.status = status
+    ElMessage.success(`#${row.id} → ${status}`)
+    await load()
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.detail || '修改失败')
+  }
+}
+
 /** 截止日期着色：逾期红、3 天内黄；已关闭的不提示 */
 const dueClass = (row: any) => {
   if (!row.due_date) return ''
@@ -706,6 +749,29 @@ const downloadWeekly = () => {
   URL.revokeObjectURL(url)
 }
 
+/** 保存后自动定性：省「跳详情→点定性」两步 */
+const autoQualify = ref(true)
+
+/* ---------- 拖拽截图直接建问题 ---------- */
+const dropActive = ref(false)
+
+const onDropFiles = (e: DragEvent) => {
+  dropActive.value = false
+  const files = [...(e.dataTransfer?.files || [])]
+  if (!files.length) return
+  const ok = files.filter((f) => f.type.startsWith('image/') || f.type === 'application/pdf')
+  const skipped = files.length - ok.length
+  if (!ok.length) {
+    ElMessage.warning('只支持图片和 PDF 附件')
+    return
+  }
+  pendingFiles.value = [...pendingFiles.value, ...ok]
+  openCreate()
+  ElMessage.success(
+    `已带 ${ok.length} 个附件` + (skipped ? `，${skipped} 个不支持的类型已忽略` : '')
+  )
+}
+
 const openCreate = () => {
   form.project_id = null
   form.raw_text = ''
@@ -753,7 +819,8 @@ const submitCreate = async () => {
     if (pendingFiles.value.length) await uploadAttachments(id, pendingFiles.value)
     if (guessed) ElMessage.success(`已自动归到「${guessProject.value!.name}」`)
     createVisible.value = false
-    router.push(`/issues/${id}`)
+    // 连招：带 autostart 参数，详情页落地即跑定性
+    router.push(`/issues/${id}${autoQualify.value ? '?autostart=qualify' : ''}`)
   } finally {
     saving.value = false
   }
@@ -898,6 +965,16 @@ html.dark mark { background: rgba(247, 144, 9, 0.45); }
   background: rgba(247, 144, 9, 0.15); color: #f79009; font-weight: 600;
 }
 
+/* 内联状态下拉 */
+.status-cell { display: inline-flex; align-items: center; }
+.status.inline { cursor: pointer; border-radius: 8px; padding: 2px 6px; transition: background 0.15s; }
+.status.inline:hover { background: var(--ih-soft); }
+.status.inline .caret {
+  width: 6px; height: 6px; border-right: 1.5px solid var(--ih-sub);
+  border-bottom: 1.5px solid var(--ih-sub);
+  transform: rotate(45deg) translateY(-2px); margin-left: 4px; opacity: 0.6;
+}
+
 /* 标签与截止 */
 .cell-tag {
   display: inline-block; margin-left: 5px; padding: 0 6px;
@@ -931,6 +1008,21 @@ html.dark mark { background: rgba(247, 144, 9, 0.45); }
 }
 
 /* 分页条 */
+.drop-mask {
+  position: fixed; inset: 0; z-index: 40;
+  background: rgba(79, 70, 229, 0.08);
+  border: 2px dashed var(--ih-primary);
+  border-radius: 16px;
+  display: flex; align-items: center; justify-content: center;
+  pointer-events: none;
+}
+.drop-hint {
+  padding: 14px 26px; border-radius: 12px; font-size: 14px; font-weight: 600;
+  background: var(--ih-card); color: var(--ih-primary);
+  box-shadow: 0 8px 24px rgba(16, 24, 40, 0.18);
+}
+.create-foot { display: flex; align-items: center; flex: 1; }
+.create-foot .el-checkbox { margin-right: auto; }
 .pager {
   display: flex; align-items: center; justify-content: center;
   gap: 12px; padding: 14px 0 4px; font-size: 12px;

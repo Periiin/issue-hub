@@ -20,6 +20,13 @@
         </nav>
 
         <div class="topbar-right">
+          <button class="search-btn" title="快速搜索（Ctrl+K）" @click="openQuickSearch">
+            <svg viewBox="0 0 24 24" width="15" height="15" fill="none"
+                 stroke="currentColor" stroke-width="2" stroke-linecap="round">
+              <circle cx="11" cy="11" r="7" /><path d="m20 20-3.5-3.5" />
+            </svg>
+            <span v-if="!isMobile" class="search-kbd">Ctrl K</span>
+          </button>
           <button class="theme-btn" :title="isDark ? '切换到浅色' : '切换到深色'" @click="toggleTheme">
             <!-- 浅色时显示月亮（点了变深色），深色时显示太阳 -->
             <svg v-if="!isDark" viewBox="0 0 24 24" width="18" height="18" fill="none"
@@ -74,6 +81,36 @@
       </router-link>
     </nav>
 
+    <!-- Ctrl+K 快搜 -->
+    <el-dialog
+      v-model="quickOpen" width="560px" append-to-body
+      :show-close="false" class="quick-dialog" @opened="focusQuick"
+    >
+      <input
+        ref="quickInput" v-model="quickQ" class="quick-input"
+        placeholder="搜标题 / 原文 / 模块…，或输入 #12 直达编号"
+        @input="quickSearch" @keydown="onQuickKey"
+      />
+      <div class="quick-list">
+        <div
+          v-for="(item, i) in quickResults" :key="item.id"
+          class="quick-item" :class="{ 'is-active': i === quickIndex }"
+          @mouseenter="quickIndex = i" @click="goQuick(item.id)"
+        >
+          <span class="ih-mono ih-muted">#{{ item.id }}</span>
+          <span class="quick-title">{{ item.title }}</span>
+          <span :class="['pill', item.priority === 'P0' ? 'pill--p0' : item.priority === 'P1' ? 'pill--p1' : 'pill--p3']">
+            {{ item.priority || '未定' }}
+          </span>
+          <span class="quick-status">{{ item.status }}</span>
+        </div>
+        <div v-if="!quickResults.length && quickQ" class="quick-empty ih-muted">没有匹配的问题</div>
+        <div v-else-if="!quickQ" class="quick-empty ih-muted">
+          输入关键词搜问题；输入 #编号 直接跳转；↑↓ 选择，回车打开
+        </div>
+      </div>
+    </el-dialog>
+
     <!-- 修改自己的密码 -->
     <el-drawer v-model="pwdDrawer" title="修改密码" :size="isMobile ? '100%' : '400px'" append-to-body>
       <el-form label-position="top">
@@ -93,7 +130,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { changePassword, clearToken, getMe, logout, type AuthUser } from './api'
@@ -141,6 +178,74 @@ const onUserCommand = async (cmd: string) => {
     router.replace('/login')
   }
 }
+
+/* ---------- Ctrl+K 快搜 ---------- */
+const quickOpen = ref(false)
+const quickQ = ref('')
+const quickResults = ref<any[]>([])
+const quickIndex = ref(0)
+const quickInput = ref<HTMLInputElement | null>(null)
+
+const openQuickSearch = () => {
+  quickOpen.value = true
+  quickQ.value = ''
+  quickResults.value = []
+  quickIndex.value = 0
+}
+
+const focusQuick = () => (quickInput.value as HTMLInputElement | null)?.focus()
+
+const quickSearch = async () => {
+  quickIndex.value = 0
+  const q = quickQ.value.trim()
+  if (!q) {
+    quickResults.value = []
+    return
+  }
+  const direct = /^#?(\d+)$/.exec(q)
+  if (direct) {
+    quickResults.value = [{ id: Number(direct[1]), title: '直接打开 #' + direct[1], priority: '', status: '' }]
+    return
+  }
+  clearTimeout((quickSearch as any)._t)
+  ;(quickSearch as any)._t = setTimeout(async () => {
+    try {
+      const { listIssues } = await import('./api')
+      const r = await listIssues({ q, limit: 8 })
+      quickResults.value = r.list || []
+    } catch {
+      quickResults.value = []
+    }
+  }, 250)
+}
+
+const goQuick = (id: number) => {
+  quickOpen.value = false
+  router.push(`/issues/${id}`)
+}
+
+const onQuickKey = (e: KeyboardEvent) => {
+  if (e.key === 'ArrowDown') {
+    e.preventDefault()
+    quickIndex.value = Math.min(quickIndex.value + 1, quickResults.value.length - 1)
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault()
+    quickIndex.value = Math.max(0, quickIndex.value - 1)
+  } else if (e.key === 'Enter') {
+    const item = quickResults.value[quickIndex.value]
+    if (item) goQuick(item.id)
+  }
+}
+
+/** 全局 Ctrl/Cmd+K */
+const onGlobalKey = (e: KeyboardEvent) => {
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+    e.preventDefault()
+    openQuickSearch()
+  }
+}
+window.addEventListener('keydown', onGlobalKey)
+onBeforeUnmount(() => window.removeEventListener('keydown', onGlobalKey))
 
 /* ---------- 改密码 ---------- */
 const pwdDrawer = ref(false)
@@ -233,6 +338,37 @@ const goCreate = () => router.push({ path: '/issues', query: { new: '1' } })
 }
 .theme-btn:hover { color: var(--ih-primary); border-color: var(--ih-primary); transform: rotate(8deg); }
 .theme-btn:active { transform: scale(0.94); }
+
+/* Ctrl+K 快搜 */
+.search-btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 36px; padding: 0 10px; border-radius: 999px;
+  border: 1px solid var(--ih-line); background: var(--ih-card);
+  color: var(--ih-sub); cursor: pointer; transition: all 0.16s ease;
+}
+.search-btn:hover { color: var(--ih-primary); border-color: var(--ih-primary); }
+.search-kbd {
+  font-size: 10.5px; padding: 1px 6px; border-radius: 6px;
+  border: 1px solid var(--ih-line); background: var(--ih-soft); color: var(--ih-sub);
+}
+.quick-input {
+  width: 100%; height: 44px; padding: 0 14px; font-size: 14px;
+  border: 1px solid var(--ih-primary); border-radius: 12px; outline: none;
+  background: var(--ih-surface); color: var(--ih-ink);
+}
+.quick-list { margin-top: 10px; max-height: 340px; overflow: auto; }
+.quick-item {
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 12px; border-radius: 10px; cursor: pointer; font-size: 13px;
+}
+.quick-item.is-active { background: var(--ih-soft); }
+.quick-title { flex: 1 1 auto; min-width: 0; color: var(--ih-ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.quick-status { font-size: 11px; color: var(--ih-sub); }
+.quick-empty { padding: 18px; text-align: center; font-size: 12.5px; }
+.pill { font-size: 10.5px; padding: 1px 8px; border-radius: 999px; font-weight: 600; }
+.pill--p0 { background: rgba(240,68,56,.12); color: #f04438; }
+.pill--p1 { background: rgba(247,144,9,.14); color: #f79009; }
+.pill--p3 { background: var(--ih-chip); color: var(--ih-sub); }
 
 /* 用户菜单按钮 */
 .user-btn {

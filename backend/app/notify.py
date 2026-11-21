@@ -48,6 +48,13 @@ def _send(url: str, kind: str, text: str) -> None:
         print(f"[notify] 发送失败：{ex}", flush=True)
 
 
+def _link(issue_id) -> str:
+    """详情页链接。base_url 没配就不带——半条链接不如不带。"""
+    s = get_settings()
+    base = (s.get("notify.base_url") or "").strip().rstrip("/")
+    return f"{base}/issues/{issue_id}" if base else ""
+
+
 def _fire(text: str) -> None:
     """enabled 才发；daemon 线程，主流程不等它。"""
     enabled, url, kind = _enabled()
@@ -64,9 +71,12 @@ def notify_new_issue(issue: dict, project_name: str = "") -> None:
     """新问题进来了。"""
     title = (issue.get("title") or "").strip()
     where = f"【{project_name}】" if project_name else ""
+    link = _link(issue.get("id"))
     text = (f"🔔 新问题 {where}#{issue.get('id')} {title}\n"
             f"模块：{issue.get('module') or '-'}　提出人：{issue.get('reporter') or '-'}\n"
             f"{_fmt_time()}")
+    if link:
+        text += f"\n👉 {link}"
     _fire(text)
 
 
@@ -76,6 +86,9 @@ def notify_new_comment(issue_id: int, issue_title: str,
     snippet = (body or "").strip().replace("\n", " ")[:120]
     text = (f"💬 问题 #{issue_id} {issue_title} 有新讨论\n"
             f"{author}：{snippet}\n{_fmt_time()}")
+    link = _link(issue_id)
+    if link:
+        text += f"\n👉 {link}"
     _fire(text)
 
 

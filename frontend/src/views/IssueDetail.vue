@@ -82,6 +82,13 @@
                 <el-option v-for="s in allStatus" :key="s" :label="s" :value="s" />
               </el-select>
               <el-button round @click="exportMd">导出</el-button>
+              <el-button round @click="openShare">分享</el-button>
+              <el-tooltip content="上一篇（Alt+←）">
+                <el-button round :disabled="!prevIssueId" @click="goNeighbor(prevIssueId)">◀</el-button>
+              </el-tooltip>
+              <el-tooltip content="下一篇（Alt+→）">
+                <el-button round :disabled="!nextIssueId" @click="goNeighbor(nextIssueId)">▶</el-button>
+              </el-tooltip>
               <el-button round type="danger" plain @click="removeIssue">删除</el-button>
             </div>
           </div>
@@ -187,6 +194,10 @@
             <el-form-item label="归属模块"><el-input v-model="q.module" /></el-form-item>
           </el-form>
           <div class="panel-foot">
+            <el-checkbox
+              v-model="autoPipeline" class="auto-pipeline-check"
+              title="确认定性后自动开始跑定级"
+            >确认后自动定级</el-checkbox>
             <el-button type="success" round :loading="confirming" @click="doConfirm">
               确认定性，进入定级
             </el-button>
@@ -408,7 +419,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import FixWorkbench from './FixWorkbench.vue'
@@ -416,7 +427,8 @@ import { useMobile } from '../useMobile'
 import {
   addComment, addLink, confirmQualify, createShare, deleteAttachment, deleteComment, deleteIssue,
   fileUrl, getAssignees, getChannels, getIssue, getMe, getProjects, getSettings, getShareInfo,
-  listComments, listLinks, patchIssue, removeLink, revokeShare, runQualify, runTriage,
+  listComments, listIssues, listLinks, patchIssue, removeLink, revokeShare, runQualify,
+  runTriage,
   uploadAttachments,
   type Assignee, type Channel, type IssueComment, type IssueLink, type Project, type ShareInfo
 } from '../api'
@@ -440,6 +452,9 @@ const fileInput = ref<HTMLInputElement | null>(null)
 const uploading = ref(false)
 const qualifying = ref(false)
 const confirming = ref(false)
+/** 确认定性 → 自动跑定级的连招开关 */
+const autoPipeline = ref(localStorage.getItem('ih-autopipeline') !== '0')
+watch(autoPipeline, (v) => localStorage.setItem('ih-autopipeline', v ? '1' : '0'))
 const triaging = ref(false)
 
 const workbenchOpen = ref(false)
@@ -689,6 +704,37 @@ const fillQualifyForm = (data: any) => {
 
 /* ===== 数据加载 ===== */
 /** attempts 挂到 issue 上，右栏组件直接读，避免重复请求 */
+/* ===== 上一篇 / 下一篇（按默认排序找当前 id 的邻居）===== */
+const prevIssueId = ref<number | null>(null)
+const nextIssueId = ref<number | null>(null)
+
+const loadNeighbors = async () => {
+  try {
+    const r = await listIssues({ limit: 200 })
+    const ids: number[] = (r.list || []).map((x: any) => x.id)
+    const i = ids.indexOf(id.value)
+    if (i < 0) return
+    prevIssueId.value = i > 0 ? ids[i - 1] : null
+    nextIssueId.value = i < ids.length - 1 ? ids[i + 1] : null
+  } catch {
+    prevIssueId.value = null
+    nextIssueId.value = null
+  }
+}
+
+const goNeighbor = (nid: number | null) => {
+  if (nid) router.push(`/issues/${nid}`)
+}
+
+/** Alt+← / Alt+→ 翻问题 */
+const onNeighborKey = (e: KeyboardEvent) => {
+  if (!e.altKey) return
+  if (e.key === 'ArrowLeft') goNeighbor(prevIssueId.value)
+  if (e.key === 'ArrowRight') goNeighbor(nextIssueId.value)
+}
+window.addEventListener('keydown', onNeighborKey)
+onBeforeUnmount(() => window.removeEventListener('keydown', onNeighborKey))
+
 /* ===== 负责人 / 截止日期 / 标签 ===== */
 const assignees = ref<Assignee[]>([])
 const assignee = ref<string>('')
@@ -804,6 +850,9 @@ const doQualify = async () => {
   }
 }
 
+// 「保存并定性」连招：从新建弹窗带 ?autostart=qualify 进来，落地即跑
+const autoStartPending = route.query.autostart === 'qualify'
+
 const doConfirm = async () => {
   confirming.value = true
   try {
@@ -822,6 +871,13 @@ const doConfirm = async () => {
     sections.qualify = false
     sections.triage = true
     ElMessage.success('已确认，进入待定级')
+    // 连招：确认定性后自动跑定级（可关，localStorage 记忆）
+    if (localStorage.getItem('ih-autopipeline') !== '0') {
+      setTimeout(() => {
+        ElMessage.info('自动开始定级…')
+        doTriage()
+      }, 400)
+    }
   } catch (e: any) {
     ElMessage.error(e?.response?.data?.detail || '确认失败')
   } finally {
@@ -898,10 +954,16 @@ onMounted(async () => {
   if (ch) channels.value = ch.channels || []
   if (s?.settings?.['ai.channel_id']) channelId.value = Number(s.settings['ai.channel_id'])
   await load()
-  await Promise.all([loadAssignees(), loadComments(), loadLinks()])
+  await Promise.all([loadAssignees(), loadComments(), loadLinks(), loadNeighbors()])
   // 当前用户决定能不能删别人的评论
   const me = await getMe().catch(() => null)
   meUser.value = me?.user || null
+  if (autoStartPending && issue.value?.status === '待定性') {
+    // 连招落地：把 query 从地址上摘掉，刷新不会重跑
+    router.replace({ query: { ...route.query, autostart: undefined } })
+    ElMessage.info('自动开始定性…')
+    doQualify()
+  }
 })
 </script>
 

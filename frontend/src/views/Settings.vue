@@ -338,6 +338,13 @@
             placeholder="群机器人 Webhook 完整地址（含 key 参数）"
           />
         </label>
+        <label class="field field--wide">
+          <span class="field-label">对外访问地址（通知里拼详情页链接用）</span>
+          <el-input
+            v-model="form['notify.base_url']"
+            placeholder="如 http://192.168.110.12:8090，不填则群消息不带链接"
+          />
+        </label>
       </div>
       <p class="field-hint">
         通知在新问题、新讨论时发出；启用前点「发送测试」确认机器人能收到。
