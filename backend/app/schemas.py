@@ -93,6 +93,8 @@ class QualifyConfirm(BaseModel):
 
 class FixRequest(BaseModel):
     channel_id: Optional[int] = None
+    # 临时指定分析范围（优先级高于 issue 已勾的和项目仓库）
+    code_scopes: Optional[list[str]] = None
 
 
 class FixApplyReq(BaseModel):
