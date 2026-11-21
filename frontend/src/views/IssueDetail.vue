@@ -414,10 +414,11 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import FixWorkbench from './FixWorkbench.vue'
 import { useMobile } from '../useMobile'
 import {
-  addComment, addLink, confirmQualify, deleteAttachment, deleteComment, deleteIssue, fileUrl,
-  getAssignees, getChannels, getIssue, getMe, getProjects, getSettings, listComments, listLinks,
-  patchIssue, removeLink, runQualify, runTriage, uploadAttachments,
-  type Assignee, type Channel, type IssueComment, type IssueLink, type Project
+  addComment, addLink, confirmQualify, createShare, deleteAttachment, deleteComment, deleteIssue,
+  fileUrl, getAssignees, getChannels, getIssue, getMe, getProjects, getSettings, getShareInfo,
+  listComments, listLinks, patchIssue, removeLink, revokeShare, runQualify, runTriage,
+  uploadAttachments,
+  type Assignee, type Channel, type IssueComment, type IssueLink, type Project, type ShareInfo
 } from '../api'
 
 const route = useRoute()
@@ -483,6 +484,55 @@ const removeLinkItem = async (l: IssueLink) => {
 }
 
 const goIssue = (targetId: number) => router.push(`/issues/${targetId}`)
+
+/* ===== 甲方只读分享 ===== */
+const shareDrawer = ref(false)
+const shareInfo = ref<ShareInfo | null>(null)
+const shareDays = ref(30)
+const shareCreating = ref(false)
+
+const shareUrl = computed(() =>
+  shareInfo.value?.token ? `${location.origin}/share/${shareInfo.value.token}` : '')
+
+const fmtDate = (t?: string) => (t || '').slice(0, 10) || '—'
+
+const openShare = async () => {
+  shareDrawer.value = true
+  try {
+    shareInfo.value = await getShareInfo(id.value)
+  } catch {
+    shareInfo.value = { token: null }
+  }
+}
+
+const doCreateShare = async () => {
+  shareCreating.value = true
+  try {
+    const r = await createShare(id.value, shareDays.value)
+    shareInfo.value = { token: r.token, expiresAt: r.expiresAt }
+    ElMessage.success('已生成，复制链接发给甲方即可')
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.detail || '生成失败')
+  } finally {
+    shareCreating.value = false
+  }
+}
+
+const copyShare = async () => {
+  try {
+    await navigator.clipboard.writeText(shareUrl.value)
+    ElMessage.success('已复制')
+  } catch {
+    ElMessage.warning('当前环境不支持自动复制，请手动选中复制')
+  }
+}
+
+const doRevokeShare = async () => {
+  await ElMessageBox.confirm('撤销后甲方打开链接会提示失效，且无法恢复。', '提示', { type: 'warning' })
+  await revokeShare(id.value, shareInfo.value?.token || '')
+  shareInfo.value = { token: null }
+  ElMessage.success('已撤销')
+}
 
 /* ===== 讨论区 ===== */
 const comments = ref<IssueComment[]>([])
@@ -906,6 +956,13 @@ onMounted(async () => {
 .link-form { display: flex; gap: 8px; align-items: center; margin-top: 10px; flex-wrap: wrap; }
 .link-kind-select { width: 92px; }
 .link-input { width: 160px; }
+
+/* 甲方只读分享 */
+.share-link-row { display: flex; gap: 8px; margin-bottom: 12px; }
+.share-link-input { flex: 1 1 auto; }
+.share-link-input :deep(input) { font-size: 12px; }
+.share-days-row { display: flex; align-items: center; gap: 10px; margin: 14px 0; }
+.share-box .el-button + .el-button { margin-left: 0; }
 
 /* 讨论区 */
 .comment-empty { padding: 14px 4px; font-size: 12.5px; }

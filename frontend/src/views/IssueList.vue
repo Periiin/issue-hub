@@ -196,7 +196,7 @@
         </el-table-column>
         <el-table-column label="问题" min-width="280">
           <template #default="{ row }">
-            <div class="cell-title">{{ row.title }}</div>
+            <div class="cell-title" v-html="highlight(row.title)" />
             <div class="cell-sub">
               {{ row.module || '未标注模块' }} · {{ row.created_at }}
               <span v-for="t in parseTags(row.tags)" :key="t" class="cell-tag">{{ t }}</span>
@@ -250,7 +250,7 @@
         <article v-for="row in data.list" :key="row.id" class="m-card" @click="goDetail(row)">
           <div class="m-card-top">
             <span :class="priorityClass(row.priority)">{{ row.priority || '未定级' }}</span>
-            <h3 class="m-title">{{ row.title }}</h3>
+            <h3 class="m-title" v-html="highlight(row.title)" />
           </div>
           <div class="m-meta">
             <span class="status"><i :class="['dot', dotClass(row.status)]" />{{ row.status }}</span>
@@ -560,6 +560,33 @@ const setStatus = (s: string) => {
   page.value = 1
   load()
 }
+/** 搜索命中高亮：先转义再包 <mark>，标题是甲方输入，必须防 XSS */
+const esc = (t: string) =>
+  t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+
+const highlight = (text: string) => {
+  const q = (filters.q || '').trim()
+  const safe = esc(text)
+  if (!q) return safe
+  try {
+    const re = new RegExp(`(${q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'gi')
+    return safe.replace(re, '<mark>$1</mark>')
+  } catch {
+    return safe
+  }
+}
+
+/** 「待验收」超过 N 天没动静，提示一下（验收是流程最后一步，最容易忘） */
+const ACCEPT_STALE_DAYS = 3
+
+const staleAccept = (row: any) => {
+  if (row.status !== '待验收') return null
+  const t = new Date((row.updated_at || '').replace(' ', 'T')).getTime()
+  if (!t) return null
+  const days = Math.floor((Date.now() - t) / 86400000)
+  return days >= ACCEPT_STALE_DAYS ? days : null
+}
+
 const parseTags = (raw: string | null) => {
   if (!raw) return []
   try {
@@ -863,6 +890,13 @@ onMounted(async () => {
 /* 状态 chips 里的「我的」快捷入口 */
 .chip-sep { width: 1px; height: 18px; background: var(--ih-line); margin: 0 4px; }
 .chip--mine { font-size: 12px; }
+
+mark { background: rgba(247, 144, 9, 0.35); color: inherit; padding: 0 1px; border-radius: 3px; }
+html.dark mark { background: rgba(247, 144, 9, 0.45); }
+.stale-mark {
+  font-style: normal; font-size: 10px; padding: 0 5px; border-radius: 999px;
+  background: rgba(247, 144, 9, 0.15); color: #f79009; font-weight: 600;
+}
 
 /* 标签与截止 */
 .cell-tag {

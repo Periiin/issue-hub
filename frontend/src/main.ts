@@ -14,12 +14,15 @@ import IssueList from './views/IssueList.vue'
 import IssueDetail from './views/IssueDetail.vue'
 import Settings from './views/Settings.vue'
 import Login from './views/Login.vue'
+import ShareView from './views/ShareView.vue'
 
 const router = createRouter({
   history: createWebHistory(),
   routes: [
     { path: '/', redirect: '/issues' },
     { path: '/login', component: Login, meta: { bare: true } },
+    // 甲方只读分享页：不带顶栏/tabbar
+    { path: '/share/:token', component: ShareView, meta: { bare: true } },
     { path: '/issues', component: IssueList },
     { path: '/issues/:id', component: IssueDetail, props: true },
     { path: '/settings', component: Settings }

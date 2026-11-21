@@ -49,6 +49,13 @@ def read_settings(user: dict = Depends(require_user)):
             "severities": SEVERITIES, "priorities": PRIORITIES}
 
 
+@router.post("/notify/test")
+def test_notify(user: dict = Depends(require_user)):
+    """发送一条测试消息到配置的 Webhook。普通用户也能点（配置项本身他们看得到）。"""
+    from .. import notify
+    return notify.send_test()
+
+
 @router.put("")
 def update_settings(payload: SettingsUpdate, user: dict = Depends(require_admin)):
     """保存全局配置。**限管理员** —— 这里能改 IP 白名单和登录开关，

@@ -169,6 +169,26 @@ export const addLink = (issueId: number, otherId: number, kind = 'duplicate') =>
 export const removeLink = (issueId: number, linkId: number) =>
   api.delete(`/issues/${issueId}/links/${linkId}`).then((r) => r.data)
 
+/** 甲方只读分享 */
+export interface ShareInfo {
+  token: string | null
+  expiresAt?: string
+  createdAt?: string
+}
+
+export const getShareInfo = (issueId: number) =>
+  api.get<ShareInfo>(`/issues/${issueId}/share`).then((r) => r.data)
+
+export const createShare = (issueId: number, days = 30) =>
+  api.post<{ token: string; expiresAt: string }>(`/issues/${issueId}/share`, { days }).then((r) => r.data)
+
+export const revokeShare = (issueId: number, token = '') =>
+  api.delete(`/issues/${issueId}/share`, { params: { token } }).then((r) => r.data)
+
+/** Webhook 通知测试 */
+export const testNotify = () =>
+  api.post<{ ok: boolean; error?: string }>('/settings/notify/test').then((r) => r.data)
+
 export interface IssueComment {
   id: number
   author: string

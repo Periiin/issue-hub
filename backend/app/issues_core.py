@@ -201,6 +201,17 @@ def create_issue(user: dict | None, title: str = "", raw_text: str = "",
         issue_id = cur.lastrowid
         add_event(conn, issue_id, "create", to_status="待定性", note="新建问题",
                   actor=_actor(user))
+    # 通知放事务外：webhook 慢不能拖慢创建（notify 内部是 daemon 线程）
+    from . import notify
+    from . import projects as _proj
+    pname = ""
+    if pid:
+        pname = (_proj.get_project(pid) or {}).get("name") or ""
+    try:
+        notify.notify_new_issue({"id": issue_id, "title": title, "module": module,
+                                 "reporter": reporter}, project_name=pname)
+    except Exception:
+        pass  # 通知失败绝不影响主流程
     return issue_id
 
 
@@ -369,8 +380,15 @@ def add_comment(user: dict | None, issue_id: int, body: str) -> dict:
             "VALUES (?, ?, ?, ?, ?)",
             (issue_id, author, (user or {}).get("id") or None, body, now()))
         add_event(conn, issue_id, "note", note=f"评论：{body[:60]}", actor=author)
+        issue_title = dict(conn.execute("SELECT title FROM issue WHERE id = ?",
+                                        (issue_id,)).fetchone())["title"]
         row = dict(conn.execute("SELECT id, author, author_id, body, created_at "
                                 "FROM comment WHERE id = ?", (cur.lastrowid,)).fetchone())
+    from . import notify
+    try:
+        notify.notify_new_comment(issue_id, issue_title, author, body)
+    except Exception:
+        pass
     return {"comment": row}
 
 

@@ -303,6 +303,48 @@
       </div>
     </section>
 
+    <!-- 新问题通知（Webhook） -->
+    <section class="panel ih-card">
+      <div class="panel-head">
+        <div class="panel-title">
+          <span class="step-badge step-badge--gray">🔔</span>
+          <div>
+            <h2>新问题通知</h2>
+            <p>有新问题或新讨论时，推一条消息到群机器人；不发通知可随时关</p>
+          </div>
+        </div>
+        <div class="panel-actions">
+          <el-button round :loading="notifyTesting" @click="doTestNotify">发送测试</el-button>
+        </div>
+      </div>
+
+      <div class="notify-grid">
+        <label class="notify-switch">
+          <el-switch v-model="form['notify.enabled']" active-value="1" inactive-value="0" />
+          <span>启用通知</span>
+        </label>
+        <label class="field">
+          <span class="field-label">机器人类型</span>
+          <el-select v-model="form['notify.webhook_kind']" class="w-140">
+            <el-option label="企业微信群机器人" value="wecom" />
+            <el-option label="飞书自定义机器人" value="feishu" />
+            <el-option label="钉钉自定义机器人" value="dingtalk" />
+          </el-select>
+        </label>
+        <label class="field field--wide">
+          <span class="field-label">Webhook 地址</span>
+          <el-input
+            v-model="form['notify.webhook_url']"
+            placeholder="群机器人 Webhook 完整地址（含 key 参数）"
+          />
+        </label>
+      </div>
+      <p class="field-hint">
+        通知在新问题、新讨论时发出；启用前点「发送测试」确认机器人能收到。
+        发送失败不影响任何主流程，只是群里少一条消息。
+      </p>
+    </section>
+
     <!-- 账号：用户管理 + 登录记录（拆成独立组件，这里已经很长了） -->
     <AccountPanel v-if="me?.role === 'admin'" />
 
@@ -452,7 +494,7 @@ import {
   changePassword, clearRate, createChannel, createProject,
   deleteChannel, deleteProject, detectMagpie, getChannels, getMe, getProjects, getRateStatus,
   getSettings, importMagpieModels, listChannelModels, mergeProjects, saveSettings,
-  scanRepos, testChannel, toggleUser, unlockRate, updateChannel, updateProject,
+  scanRepos, testNotify, testChannel, unlockRate, updateChannel, updateProject,
   type AuthUser, type Channel, type MagpieDetect, type Project, type ScanResult
 } from '../api'
 import AccountPanel from './AccountPanel.vue'
@@ -535,6 +577,23 @@ const doMagpieImport = async () => {
     ElMessage.error(e?.response?.data?.detail || '导入失败')
   } finally {
     magpieImporting.value = false
+  }
+}
+
+const notifyTesting = ref(false)
+
+const doTestNotify = async () => {
+  // 先保存当前填的配置再测，否则测的是旧值
+  await save(true)
+  notifyTesting.value = true
+  try {
+    const r = await testNotify()
+    if (r.ok) ElMessage.success('已发出，去群里看看')
+    else ElMessage.error(r.error || '发送失败')
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.detail || '发送失败')
+  } finally {
+    notifyTesting.value = false
   }
 }
 
@@ -855,6 +914,12 @@ onMounted(async () => {
 
 <style scoped>
 
+/* ===== 通知区块 ===== */
+.notify-grid { display: grid; grid-template-columns: auto 200px 1fr; gap: 14px; align-items: end; }
+.notify-switch { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--ih-ink); padding-bottom: 8px; }
+/* URL 单独占满一整行，太长会被压 */
+.notify-grid .field--wide { grid-column: 1 / -1; }
+
 /* ===== AI 通道卡片 ===== */
 .ch-list { display: flex; flex-direction: column; gap: 8px; }
 .ch-card {
@@ -1071,6 +1136,8 @@ onMounted(async () => {
 }
 
 @media (max-width: 768px) {
+  .notify-grid { grid-template-columns: 1fr; align-items: stretch; }
+  .notify-switch { padding-bottom: 0; }
   .page-head .el-button { display: none; }
   .panel { padding: 14px; }
   .field-grid { grid-template-columns: 1fr; }

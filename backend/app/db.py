@@ -214,6 +214,17 @@ CREATE TABLE IF NOT EXISTS comment (
 );
 CREATE INDEX IF NOT EXISTS idx_comment_issue ON comment(issue_id);
 
+-- 甲方只读分享：带 token 的只读视图，token 即凭证（不可枚举、可撤销）
+CREATE TABLE IF NOT EXISTS share_token (
+    token       TEXT PRIMARY KEY,
+    issue_id    INTEGER NOT NULL,
+    created_by  INTEGER,               -- 谁生成的
+    created_at  TEXT NOT NULL,
+    expires_at  TEXT,                  -- 可空 = 永不过期
+    revoked     INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_share_issue ON share_token(issue_id);
+
 -- 重复问题关联：同一 bug 甲方分几次提时把它们连起来
 CREATE TABLE IF NOT EXISTS issue_link (
     id        INTEGER PRIMARY KEY AUTOINCREMENT,

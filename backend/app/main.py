@@ -15,7 +15,7 @@ from . import auth as auth_mod
 from . import ratelimit as rl
 from .config import ATTACH_DIR, FRONTEND_DIST
 from .db import init_db
-from .routers import ai, auth, channels, fix, issues, projects, report, repos, settings
+from .routers import ai, auth, channels, fix, issues, projects, report, repos, settings, share
 from .routers.auth import OPEN_PATHS, auth_enabled, client_ip, current_user
 
 app = FastAPI(title="Issue Hub", version="0.1.0")
@@ -39,6 +39,17 @@ async def auth_guard(request: Request, call_next):
     """
     path = request.url.path
     if not path.startswith("/api/") or path in OPEN_PATHS:
+        return await call_next(request)
+
+    # 甲方只读分享：token 即凭证，访问者本来就没有账号。
+    # 只放行 GET；管理操作（生成/撤销）在 /api/issues/.../share 下走正常鉴权。
+    # 仍然受限流（按 IP），防止拿 token 当靶子刷。
+    if path.startswith("/api/share/") and request.method == "GET":
+        try:
+            rl.check_api(None, client_ip(request), path)
+        except rl.RateLimited as ex:
+            return JSONResponse({"detail": str(ex)}, status_code=429,
+                                headers={"Retry-After": str(ex.retry_after)})
         return await call_next(request)
 
     ip = client_ip(request)
@@ -77,6 +88,7 @@ app.include_router(projects.router)
 app.include_router(channels.router)
 app.include_router(repos.router)
 app.include_router(report.router)
+app.include_router(share.router)
 app.include_router(settings.router)
 
 

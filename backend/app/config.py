@@ -62,6 +62,10 @@ DEFAULT_SETTINGS = {
     # 可信反代地址：只有来自这些 IP 的请求，X-Forwarded-For 才被采信。
     # 回环与常见 docker 网关已内置，额外加 nginx 的地址写这里（逗号或换行分隔）
     "auth.trusted_proxies": "",
+    # 新问题/新评论 Webhook 通知（企业微信群机器人 / 飞书 / 钉钉自定义机器人）
+    "notify.enabled": "0",
+    "notify.webhook_kind": "wecom",     # wecom / feishu / dingtalk
+    "notify.webhook_url": "",
     # AI 分析代码时的工作目录（单目录，兼容旧配置）
     "repo.root": "/src/gym-fold",
     # 扫描根：一行一个，从这些目录往下找 git 仓库并自动聚成项目。
